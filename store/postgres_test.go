@@ -236,7 +236,7 @@ func TestPostgresTenantIsolation(t *testing.T) {
 	if _, err := s.pool.Exec(ctx, fmt.Sprintf(
 		`DO $$ BEGIN
 			IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '%[1]s') THEN
-				CREATE ROLE %[2]s NOLOGIN;
+				CREATE ROLE %[2]s LOGIN;
 			END IF;
 		END $$`, probeRole, quoteIdent(probeRole))); err != nil {
 		t.Fatalf("create probe role: %v", err)
@@ -247,8 +247,8 @@ func TestPostgresTenantIsolation(t *testing.T) {
 		t.Fatalf("grant probe: %v", err)
 	}
 	if _, err := s.pool.Exec(ctx,
-		`ALTER ROLE `+quoteIdent(probeRole)+` WITH PASSWORD '`+probePass+`'`); err != nil {
-		t.Fatalf("set probe password: %v", err)
+		`ALTER ROLE `+quoteIdent(probeRole)+` WITH LOGIN PASSWORD '`+probePass+`'`); err != nil {
+		t.Fatalf("set probe login: %v", err)
 	}
 	t.Cleanup(func() {
 		_, _ = s.pool.Exec(context.Background(), `DROP ROLE IF EXISTS `+quoteIdent(probeRole))
