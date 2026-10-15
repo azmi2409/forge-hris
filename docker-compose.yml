@@ -1,0 +1,57 @@
+# forge-hris — local / single-host deployment (component 1: core platform).
+#
+# Usage:
+#   cp .env.example .env   # optional; sane defaults are built in
+#   docker compose up -d
+#
+# This starts:
+#   postgres — Postgres 16, data in the pgdata volume. The component-1
+#              schema (store/migrations/001_init.sql) is applied on first
+#              init via /docker-entrypoint-initdb.d.
+#   api      — REST API on :8080. Applies the embedded schema migrations on
+#              every boot (idempotent, so upgrades are safe).
+#
+# Endpoints once up:
+#   http://localhost:8080/healthz        health check
+#   http://localhost:8080/api/v1/...     REST API
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-forge}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-forge}
+      POSTGRES_DB: ${POSTGRES_DB:-forge_hris}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./store/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-forge} -d ${POSTGRES_DB:-forge_hris}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  api:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgres://${POSTGRES_USER:-forge}:${POSTGRES_PASSWORD:-forge}@postgres:5432/${POSTGRES_DB:-forge_hris}?sslmode=disable}
+      PORT: "8080"
+    ports:
+      - "${API_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz | grep -q '\"status\":\"ok\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+volumes:
+  pgdata:

@@ -22,6 +22,43 @@ Pre-build. The REA is complete; component implementation follows the plan in [`T
 5. Payroll engine — runs, statutory rule packs, payslips, bank files, exports.
 6. Integrations — Sync Items, Xero bill-on-approval, Slack/Teams bots, ESS portal.
 
+## Quickstart
+
+Prerequisites: Go 1.27+.
+
+```bash
+# Run the API (in-memory store; data is lost on restart)
+go run ./cmd/forge-hris-api
+```
+
+Bootstrap the first organization — the only unauthenticated mutating route.
+The owner token is shown **once**; save it.
+
+```bash
+RESP=$(curl -s -X POST localhost:8080/api/v1/organizations \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Acme Sdn Bhd","slug":"acme","country_code":"MY",
+       "owner":{"first_name":"Azmi","last_name":"Muwahid","email":"azmi@acme.test"}}')
+TOKEN=$(echo "$RESP" | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
+ORG=$(echo "$RESP" | python3 -c 'import json,sys; print(json.load(sys.stdin)["organization"]["id"])')
+
+curl -s localhost:8080/healthz
+# {"status":"ok"}
+
+curl -s "localhost:8080/api/v1/organizations/$ORG/employees" \
+  -H "Authorization: Bearer $TOKEN" | head -c 300
+```
+
+Against Postgres (schema is auto-applied on boot):
+
+```bash
+export DATABASE_URL=postgres://forge:forge@localhost:5432/forge_hris?sslmode=disable
+go run ./cmd/forge-hris-api
+```
+
+Or everything with one command: `docker compose up -d` (see [DEPLOY.md](DEPLOY.md)).
+Full API contract: [`docs/openapi.yaml`](docs/openapi.yaml).
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

@@ -1,0 +1,1318 @@
+openapi: 3.1.0
+info:
+  title: forge-hris API — component 1 (identity, tenancy, audit)
+  version: 1.0.0
+  description: |
+    Core platform API for forge-hris: organizations, groups, employees, RBAC
+    roles, credentials (PATs + service accounts), and the hash-chained audit log.
+
+    ## Authentication
+
+    Every route requires `Authorization: Bearer <token>` except `GET /healthz`
+    and the `POST /api/v1/organizations` bootstrap. Tokens are presented once
+    at issuance; only their SHA-256 hash is stored. Personal access tokens
+    inherit the employee's RBAC role; service accounts carry explicit scopes.
+
+    ## Tenancy
+
+    A credential is bound to exactly one organization. Every route carrying an
+    `{orgId}` path parameter rejects a mismatch with `403 FORBIDDEN`.
+
+    ## Errors
+
+    All errors use a flat envelope with stable UPPER_SNAKE codes and echo the
+    request ID (`X-Request-ID`) for log correlation:
+
+        {"code":"NOT_FOUND","message":"...","details":{...},"request_id":"..."}
+
+    ## Pagination
+
+    List routes return `{data, next_cursor, has_more}`. `limit` defaults to 100
+    and is clamped to 1000; `cursor` is the opaque token from the previous
+    page's `next_cursor`.
+
+    ## Idempotency
+
+    All POSTs accept an `Idempotency-Key` header. A repeated key with the same
+    request replays the stored response; with a different request body it is
+    rejected with `409 IDEMPOTENCY_KEY_REUSED`. Keys are scoped per
+    organization and expire after 24h. The unauthenticated bootstrap route is
+    not idempotent — a retried bootstrap collides on the slug with
+    `409 ALREADY_EXISTS`.
+
+    ## Rate limiting
+
+    100 requests/minute per credential. Exceeding it returns `429 RATE_LIMITED`
+    with a `Retry-After` header (seconds).
+
+    ## Bootstrap flow
+
+    1. `POST /api/v1/organizations` with `{name, slug, country_code, owner}`
+       (no auth). The response contains the organization, the owner employee,
+       the owner PAT credential, and `token` — the plaintext, shown once.
+    2. Use the token as `Authorization: Bearer <token>` for all further calls.
+servers:
+  - url: http://localhost:8080
+    description: Local development
+
+security:
+  - bearerAuth: []
+
+paths:
+  /healthz:
+    get:
+      summary: Health check
+      description: Returns service liveness. No authentication required.
+      security: []
+      operationId: healthz
+      responses:
+        '200':
+          description: Service is up
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+  /api/v1/organizations:
+    post:
+      summary: Bootstrap an organization
+      description: |
+        Creates an organization, its owner employee (status `joined`), the
+        owner membership, and a personal access token for the owner. No
+        authentication required — this is how the first credential is minted.
+        The response includes `token`, the plaintext bearer token, shown
+        exactly once. Not idempotent: retrying with the same slug returns
+        `409 ALREADY_EXISTS`. The owner is assigned a generated employee
+        number (`EMP-<8 hex>`) since the bootstrap request carries none.
+      security: []
+      operationId: bootstrapOrganization
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BootstrapRequest'
+      responses:
+        '201':
+          description: Organization bootstrapped
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BootstrapResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '409':
+          $ref: '#/components/responses/AlreadyExists'
+    get:
+      summary: Get the caller's organization
+      description: |
+        Returns the organization the caller's credential belongs to, wrapped
+        in the standard page envelope. There is no cross-tenant listing.
+      operationId: listOrganizations
+      responses:
+        '200':
+          description: The caller's organization
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrganizationList'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+
+  /api/v1/organizations/{orgId}:
+    parameters:
+      - $ref: '#/components/parameters/OrgId'
+    get:
+      summary: Get an organization
+      operationId: getOrganization
+      responses:
+        '200':
+          description: The organization
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Organization'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      summary: Update an organization
+      description: |
+        Partial update with optimistic concurrency: `version` is required and
+        must match the current version, otherwise `409 VERSION_CONFLICT`.
+        Requires owner or admin.
+      operationId: patchOrganization
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version]
+              properties:
+                name:
+                  type: string
+                version:
+                  type: integer
+                  format: int64
+                  description: Current version from a prior GET; required.
+      responses:
+        '200':
+          description: Updated organization
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Organization'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Version conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                versionConflict:
+                  value:
+                    code: VERSION_CONFLICT
+                    message: resource changed since it was read; GET it again and retry
+                    request_id: abc123
+
+  /api/v1/organizations/{orgId}/groups:
+    parameters:
+      - $ref: '#/components/parameters/OrgId'
+    post:
+      summary: Create a group
+      description: Requires manager or higher.
+      operationId: createGroup
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                parent_id:
+                  type: string
+                  description: Parent group ID; empty string clears.
+      responses:
+        '201':
+          description: Created group
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Group'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/IdempotencyKeyReused'
+    get:
+      summary: List groups
+      operationId: listGroups
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Paginated groups
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GroupList'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/organizations/{orgId}/groups/{groupId}:
+    parameters:
+      - $ref: '#/components/parameters/OrgId'
+      - name: groupId
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      summary: Get a group
+      operationId: getGroup
+      responses:
+        '200':
+          description: The group
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Group'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      summary: Update a group
+      description: Requires manager or higher. `version` is required; stale versions return `409 VERSION_CONFLICT`.
+      operationId: patchGroup
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version]
+              properties:
+                name:
+                  type: string
+                parent_id:
+                  type: string
+                  description: Parent group ID; empty string clears.
+                version:
+                  type: integer
+                  format: int64
+      responses:
+        '200':
+          description: Updated group
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Group'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/VersionConflict'
+    delete:
+      summary: Delete a group
+      description: Requires manager or higher. Fails with `409 GROUP_NOT_EMPTY` when employees are still assigned to the group.
+      operationId: deleteGroup
+      responses:
+        '204':
+          description: Group deleted
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Group still has members
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                notEmpty:
+                  value:
+                    code: GROUP_NOT_EMPTY
+                    message: group still has members assigned
+                    request_id: abc123
+
+  /api/v1/organizations/{orgId}/employees:
+    parameters:
+      - $ref: '#/components/parameters/OrgId'
+    post:
+      summary: Create an employee
+      description: |
+        Requires owner or admin. `employee_number` is generated as `EMP-<8 hex>`
+        when omitted (it must be unique per organization; pass your own value
+        to use an HR-assigned scheme). The member role is granted automatically
+        only when the employee is already `joined`; otherwise grant it later
+        via `PUT /roles/{employeeId}` once they join.
+      operationId: createEmployee
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateEmployeeRequest'
+      responses:
+        '201':
+          description: Created employee
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Employee'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/IdempotencyKeyReused'
+    get:
+      summary: List employees
+      description: Requires the `employees:read` scope.
+      operationId: listEmployees
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - name: group_id
+          in: query
+          schema:
+            type: string
+        - name: status
+          in: query
+          description: Invitation status filter.
+          schema:
+            type: string
+        - name: q
+          in: query
+          description: Free-text search over name/email/employee number.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Paginated employees
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmployeeList'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/organizations/{orgId}/employees/{employeeId}:
+    parameters:
+      - $ref: '#/components/parameters/OrgId'
+      - name: employeeId
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      summary: Get an employee
+      description: |
+        Requires the `employees:read` scope. Members may only read their own
+        record; reading anyone else's returns `403 FORBIDDEN`.
+      operationId: getEmployee
+      responses:
+        '200':
+          description: The employee
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Employee'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      summary: Update an employee
+      description: Requires owner or admin. `version` is required; stale versions return `409 VERSION_CONFLICT`. Send empty string for `group_id`/`manager_id` to unassign.
+      operationId: patchEmployee
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version]
+              properties:
+                first_name:
+                  type: string
+                last_name:
+                  type: string
+                email:
+                  type: string
+                  format: email
+                position:
+                  type: string
+                employment_type:
+                  type: string
+                  enum: [full_time, part_time, contract, intern]
+                group_id:
+                  type: string
+                manager_id:
+                  type: string
+                time_zone:
+                  type: string
+                  example: Asia/Jakarta
+                work_start_date:
+                  type: string
+                  format: date-time
+                version:
+                  type: integer
+                  format: int64
+      responses:
+        '200':
+          description: Updated employee
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Employee'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/VersionConflict'
+
+  /api/v1/organizations/{orgId}/employees/{employeeId}/deactivate:
+    parameters:
+      - $ref: '#/components/parameters/OrgId'
+      - name: employeeId
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      summary: Deactivate an employee
+      description: Soft-deactivate. Requires owner or admin. `version` is required; stale versions return `409 VERSION_CONFLICT`.
+      operationId: deactivateEmployee
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version]
+              properties:
+                version:
+                  type: integer
+                  format: int64
+      responses:
+        '200':
+          description: Deactivated employee
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Employee'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/VersionConflict'
+
+  /api/v1/organizations/{orgId}/roles:
+    parameters:
+      - $ref: '#/components/parameters/OrgId'
+    get:
+      summary: List role memberships
+      description: Requires owner or admin.
+      operationId: listMemberships
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Paginated memberships
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MembershipList'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/organizations/{orgId}/roles/{employeeId}:
+    parameters:
+      - $ref: '#/components/parameters/OrgId'
+      - name: employeeId
+        in: path
+        required: true
+        schema:
+          type: string
+    put:
+      summary: Assign a role
+      description: |
+        Requires owner or admin. Owners may assign any role; admins may only
+        assign `manager` or `member` — assigning `owner`/`admin` as an admin
+        returns `403 FORBIDDEN`.
+      operationId: setRole
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              properties:
+                role:
+                  $ref: '#/components/schemas/Role'
+      responses:
+        '200':
+          description: Role assigned
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [employee_id, role]
+                properties:
+                  employee_id:
+                    type: string
+                  role:
+                    $ref: '#/components/schemas/Role'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/organizations/{orgId}/credentials:
+    parameters:
+      - $ref: '#/components/parameters/OrgId'
+    post:
+      summary: Issue a credential
+      description: |
+        Requires owner or admin. Issues either a personal access token
+        (`kind: pat`, bound to a joined employee; scopes are derived from the
+        employee's role and must not be sent) or a service account
+        (`kind: service_account`, with explicit validated scopes).
+
+        The response includes `token`, the plaintext bearer token, shown
+        exactly once — only its SHA-256 hash is stored and it can never be
+        retrieved again.
+
+        `payroll:submit` may only be granted by an owner; any other caller
+        requesting it receives `403 FORBIDDEN`.
+      operationId: issueCredential
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCredentialRequest'
+      responses:
+        '201':
+          description: Issued credential
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialIssuance'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/IdempotencyKeyReused'
+    get:
+      summary: List credentials
+      description: Requires owner or admin. Token hashes and plaintext tokens are never exposed.
+      operationId: listCredentials
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Paginated credentials
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialList'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/organizations/{orgId}/credentials/{credentialId}:
+    parameters:
+      - $ref: '#/components/parameters/OrgId'
+      - name: credentialId
+        in: path
+        required: true
+        schema:
+          type: string
+    delete:
+      summary: Revoke a credential
+      description: Requires owner or admin. Revocation is immediate; the token stops authenticating.
+      operationId: revokeCredential
+      responses:
+        '204':
+          description: Credential revoked
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/organizations/{orgId}/audit_events:
+    parameters:
+      - $ref: '#/components/parameters/OrgId'
+    get:
+      summary: List audit events
+      description: |
+        Requires the `audit:read` scope. Events are append-only and
+        hash-chained; each carries actor, action, resource, before/after
+        snapshots, and the idempotency key when the mutation was idempotent.
+      operationId: listAuditEvents
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - name: actor_type
+          in: query
+          schema:
+            $ref: '#/components/schemas/ActorType'
+        - name: action
+          in: query
+          description: e.g. employee.created
+          schema:
+            type: string
+        - name: resource_type
+          in: query
+          schema:
+            type: string
+        - name: since
+          in: query
+          description: RFC3339 lower bound on event time.
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: Paginated audit events
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditEventList'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        Personal access token or service-account token. Minted via the
+        bootstrap (`POST /api/v1/organizations`) or
+        `POST /api/v1/organizations/{orgId}/credentials`. The plaintext is
+        shown once at issuance; present it as `Authorization: Bearer <token>`.
+        A PAT authenticates only while its employee's status is `joined` —
+        deactivating the employee immediately invalidates the token.
+
+  parameters:
+    OrgId:
+      name: orgId
+      in: path
+      required: true
+      description: Organization ID. Must match the caller's organization.
+      schema:
+        type: string
+    Limit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        default: 100
+        maximum: 1000
+    Cursor:
+      name: cursor
+      in: query
+      description: Opaque cursor from the previous page's next_cursor.
+      schema:
+        type: string
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      description: |
+        Key for idempotent POSTs. Repeating a key with the same request
+        replays the stored response; with a different request body it returns
+        409 IDEMPOTENCY_KEY_REUSED.
+      schema:
+        type: string
+
+  responses:
+    Unauthenticated:
+      description: Missing, invalid, expired, or revoked credential.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            unauthenticated:
+              value:
+                code: UNAUTHENTICATED
+                message: invalid, expired, or revoked credential
+                request_id: abc123
+    Forbidden:
+      description: Authenticated but not permitted (role, scope, own-record, or cross-tenant violation).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            forbidden:
+              value:
+                code: FORBIDDEN
+                message: requires admin role or higher to update employees
+                request_id: abc123
+    NotFound:
+      description: Resource not found.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            notFound:
+              value:
+                code: NOT_FOUND
+                message: employee not found
+                request_id: abc123
+    ValidationError:
+      description: Request failed validation.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            validation:
+              value:
+                code: VALIDATION_ERROR
+                message: "version: required and must be positive"
+                details:
+                  field: version
+                request_id: abc123
+    AlreadyExists:
+      description: Unique constraint violated (e.g. organization slug).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            alreadyExists:
+              value:
+                code: ALREADY_EXISTS
+                message: organization slug already taken
+                request_id: abc123
+    VersionConflict:
+      description: Optimistic-concurrency conflict.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            versionConflict:
+              value:
+                code: VERSION_CONFLICT
+                message: resource changed since it was read; GET it again and retry
+                request_id: abc123
+    IdempotencyKeyReused:
+      description: Idempotency key already used with a different request body.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            reused:
+              value:
+                code: IDEMPOTENCY_KEY_REUSED
+                message: idempotency key was already used with a different request
+                request_id: abc123
+    RateLimited:
+      description: Too many requests.
+      headers:
+        Retry-After:
+          description: Seconds until the window resets.
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            rateLimited:
+              value:
+                code: RATE_LIMITED
+                message: "rate limit exceeded: 100 requests/minute per credential"
+                request_id: abc123
+
+  schemas:
+    Error:
+      title: Flat error envelope
+      type: object
+      required: [code, message, request_id]
+      properties:
+        code:
+          type: string
+          description: Stable UPPER_SNAKE error code.
+          example: NOT_FOUND
+        message:
+          type: string
+          example: employee not found
+        details:
+          type: object
+          description: Machine-readable extra context (e.g. the failing field).
+          additionalProperties: true
+        request_id:
+          type: string
+          description: Echo of the X-Request-ID response header for log correlation.
+          example: abc123
+
+    Role:
+      type: string
+      enum: [owner, admin, manager, member]
+
+    ActorType:
+      type: string
+      enum: [human, agent, system, scim]
+
+    CredentialKind:
+      type: string
+      enum: [pat, service_account]
+
+    Scope:
+      type: string
+      enum:
+        - time:read
+        - time:write
+        - leave:read
+        - leave:write
+        - leave:approve
+        - payroll:read
+        - payroll:preview
+        - payroll:submit
+        - employees:read
+        - audit:read
+
+    Organization:
+      type: object
+      required: [id, name, slug, country_code, created_at, updated_at, version]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        slug:
+          type: string
+        country_code:
+          type: string
+          example: ID
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        version:
+          type: integer
+          format: int64
+
+    OrganizationList:
+      type: object
+      required: [data, next_cursor, has_more]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Organization'
+        next_cursor:
+          type: string
+        has_more:
+          type: boolean
+
+    BootstrapRequest:
+      type: object
+      required: [name, slug, country_code, owner]
+      properties:
+        name:
+          type: string
+          example: Acme Corp
+        slug:
+          type: string
+          example: acme
+        country_code:
+          type: string
+          example: ID
+        owner:
+          type: object
+          required: [first_name, last_name, email]
+          properties:
+            first_name:
+              type: string
+            last_name:
+              type: string
+            email:
+              type: string
+              format: email
+
+    BootstrapResponse:
+      type: object
+      required: [organization, employee, credential, token]
+      properties:
+        organization:
+          $ref: '#/components/schemas/Organization'
+        employee:
+          $ref: '#/components/schemas/Employee'
+        credential:
+          $ref: '#/components/schemas/Credential'
+        token:
+          type: string
+          description: Plaintext bearer token, shown exactly once.
+          example: hris_...
+
+    Group:
+      type: object
+      required: [id, organization_id, name, created_at, updated_at, version]
+      properties:
+        id:
+          type: string
+        organization_id:
+          type: string
+        name:
+          type: string
+        parent_id:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        version:
+          type: integer
+          format: int64
+
+    GroupList:
+      type: object
+      required: [data, next_cursor, has_more]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Group'
+        next_cursor:
+          type: string
+        has_more:
+          type: boolean
+
+    Employee:
+      type: object
+      required: [id, organization_id, first_name, last_name, email, status, created_at, updated_at, version]
+      properties:
+        id:
+          type: string
+        organization_id:
+          type: string
+        employee_number:
+          type: string
+          description: Unique per organization. Generated as EMP-<8 hex> when omitted.
+        first_name:
+          type: string
+        last_name:
+          type: string
+        email:
+          type: string
+          format: email
+        position:
+          type: string
+        employment_type:
+          type: string
+          enum: [full_time, part_time, contract, intern]
+        group_id:
+          type: string
+          nullable: true
+        manager_id:
+          type: string
+          nullable: true
+        time_zone:
+          type: string
+          example: Asia/Jakarta
+        work_start_date:
+          type: string
+          format: date-time
+          nullable: true
+        status:
+          type: string
+          enum: [not_invited, pending_invitation, joined, removed]
+          description: Invitation status. PATs authenticate only while joined.
+          example: joined
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        version:
+          type: integer
+          format: int64
+
+    CreateEmployeeRequest:
+      type: object
+      required: [first_name, last_name, email]
+      properties:
+        employee_number:
+          type: string
+        first_name:
+          type: string
+        last_name:
+          type: string
+        email:
+          type: string
+          format: email
+        position:
+          type: string
+        employment_type:
+          type: string
+        group_id:
+          type: string
+        manager_id:
+          type: string
+        time_zone:
+          type: string
+          example: Asia/Jakarta
+        work_start_date:
+          type: string
+          format: date-time
+
+    EmployeeList:
+      type: object
+      required: [data, next_cursor, has_more]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Employee'
+        next_cursor:
+          type: string
+        has_more:
+          type: boolean
+
+    Membership:
+      type: object
+      required: [organization_id, employee_id, role, created_at]
+      properties:
+        organization_id:
+          type: string
+        employee_id:
+          type: string
+        role:
+          $ref: '#/components/schemas/Role'
+        granted_by:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    MembershipList:
+      type: object
+      required: [data, next_cursor, has_more]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Membership'
+        next_cursor:
+          type: string
+        has_more:
+          type: boolean
+
+    Credential:
+      type: object
+      description: Public shape of a credential. The token hash is never exposed.
+      required: [id, organization_id, kind, name, created_at, version]
+      properties:
+        id:
+          type: string
+        organization_id:
+          type: string
+        kind:
+          $ref: '#/components/schemas/CredentialKind'
+        name:
+          type: string
+        employee_id:
+          type: string
+          nullable: true
+          description: Set for PATs; null for service accounts.
+        scopes:
+          type: array
+          items:
+            $ref: '#/components/schemas/Scope'
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+        revoked_at:
+          type: string
+          format: date-time
+          nullable: true
+        last_used_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        version:
+          type: integer
+          format: int64
+
+    CredentialList:
+      type: object
+      required: [data, next_cursor, has_more]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Credential'
+        next_cursor:
+          type: string
+        has_more:
+          type: boolean
+
+    CreateCredentialRequest:
+      type: object
+      required: [kind, name]
+      properties:
+        kind:
+          $ref: '#/components/schemas/CredentialKind'
+        name:
+          type: string
+          example: payroll-agent
+        employee_id:
+          type: string
+          description: Required for PATs (employee must have joined status); must not be set for service accounts.
+        scopes:
+          type: array
+          description: Required for service accounts; must not be set for PATs (scopes derive from the employee's role). `payroll:submit` may only be granted by an owner.
+          items:
+            $ref: '#/components/schemas/Scope'
+        expires_at:
+          type: string
+          format: date-time
+          description: Must be in the future.
+
+    CredentialIssuance:
+      type: object
+      required: [credential, token]
+      properties:
+        credential:
+          $ref: '#/components/schemas/Credential'
+        token:
+          type: string
+          description: Plaintext bearer token, shown exactly once. Store it securely — it cannot be retrieved again.
+          example: hris_...
+
+    AuditEvent:
+      type: object
+      required: [id, organization_id, actor_type, actor_id, action, resource_type, resource_id, prev_hash, hash, created_at]
+      properties:
+        id:
+          type: integer
+          format: int64
+        organization_id:
+          type: string
+        actor_type:
+          $ref: '#/components/schemas/ActorType'
+        actor_id:
+          type: string
+          description: Credential ID that performed the action (or "bootstrap" for system bootstrap events).
+        on_behalf_of:
+          type: string
+          nullable: true
+          description: Delegated identity for act_as flows.
+        action:
+          type: string
+          example: employee.created
+        resource_type:
+          type: string
+          example: employee
+        resource_id:
+          type: string
+        before:
+          description: JSON snapshot before the mutation; null on creation.
+          nullable: true
+        after:
+          description: JSON snapshot after the mutation; null on deletion.
+          nullable: true
+        idempotency_key:
+          type: string
+          nullable: true
+        prev_hash:
+          type: string
+          description: Hash of the previous event in the chain.
+        hash:
+          type: string
+          description: Hash of this event, chaining to prev_hash.
+        created_at:
+          type: string
+          format: date-time
+
+    AuditEventList:
+      type: object
+      required: [data, next_cursor, has_more]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditEvent'
+        next_cursor:
+          type: string
+        has_more:
+          type: boolean
