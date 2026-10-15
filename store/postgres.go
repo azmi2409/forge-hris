@@ -18,8 +18,11 @@ import (
 // It implements the exact same contract as MemoryStore: UUID identities,
 // optimistic concurrency via the version column (UPDATE ... WHERE id AND
 // version, 0 rows -> ErrVersionConflict/ErrNotFound), soft employee deletes,
-// and a hash-chained audit log whose chain link is taken under
-// SELECT ... FOR UPDATE so concurrent appends serialize on the org's tail.
+// and a hash-chained audit log whose appends serialize per org on a
+// transaction-scoped advisory lock (pg_advisory_xact_lock). NOTE: a plain
+// SELECT ... FOR UPDATE on the tail row is NOT sufficient here — under READ
+// COMMITTED a waiter re-checks the row it blocked on instead of re-finding
+// the newest tail, so concurrent appends could fork the chain.
 //
 // Tenancy: every org-scoped operation runs inside a transaction that first
 // executes SELECT set_config('app.tenant_id', $1, true) (SET LOCAL
@@ -1068,7 +1071,19 @@ func (s *PostgresStore) AppendAuditEvent(ctx context.Context, e AuditEvent) (Aud
 		return AuditEvent{}, err
 	}
 	err := s.inTenant(ctx, e.OrganizationID, func(tx pgx.Tx) error {
-		// Lock the org's tail so concurrent appends serialize on the chain.
+		// Serialize appends per org on an advisory lock. A SELECT ... FOR UPDATE
+		// on the tail row is not enough: under READ COMMITTED a waiter
+		// re-checks the row it blocked on rather than re-finding the newest
+		// tail, so two concurrent appends could both link to the same parent
+		// and fork the chain. The advisory lock makes tail-read + insert
+		// atomic per org.
+		if _, err := tx.Exec(ctx,
+			`SELECT pg_advisory_xact_lock(hashtext('forge-hris:audit:' || $1::text))`,
+			e.OrganizationID); err != nil {
+			return fmt.Errorf("store: audit append lock: %w", err)
+		}
+		// Read the org's tail; the advisory lock above guarantees no
+		// concurrent append can slip a new tail in underneath us.
 		var prevHash string
 		err := tx.QueryRow(ctx,
 			`SELECT hash FROM audit_events WHERE organization_id = $1::uuid ORDER BY id DESC LIMIT 1 FOR UPDATE`,

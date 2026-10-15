@@ -243,7 +243,10 @@ func TestPostgresTenantIsolation(t *testing.T) {
 	}
 	if _, err := s.pool.Exec(ctx,
 		`GRANT USAGE ON SCHEMA public TO `+quoteIdent(probeRole)+`; `+
-			`GRANT SELECT ON employees, credentials, audit_events TO `+quoteIdent(probeRole)); err != nil {
+			// organizations is included so the probe's NewPostgresStore schema
+			// check (information_schema only shows tables the role can see)
+			// succeeds; the probe only ever scans employees.
+			`GRANT SELECT ON organizations, employees, credentials, audit_events TO `+quoteIdent(probeRole)); err != nil {
 		t.Fatalf("grant probe: %v", err)
 	}
 	if _, err := s.pool.Exec(ctx,
