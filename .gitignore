@@ -1,0 +1,20 @@
+# binaries / build output
+/bin/
+/dist/
+node_modules/
+vendor/
+
+# env / secrets — never commit
+.env
+.env.*
+*.pem
+*.key
+
+# editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# logs / temp
+*.log
+/tmp/
