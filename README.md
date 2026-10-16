@@ -49,6 +49,47 @@ curl -s "localhost:8080/api/v1/organizations/$ORG/employees" \
   -H "Authorization: Bearer $TOKEN" | head -c 300
 ```
 
+Time tracking and leave (components 2–3). Issue a PAT for the owner —
+clock in/out and break operations require an `Idempotency-Key` header.
+
+```bash
+OWNER=$(echo "$RESP" | python3 -c 'import json,sys; print(json.load(sys.stdin)["employee"]["id"])')
+PAT=$(curl -s -X POST "localhost:8080/api/v1/organizations/$ORG/credentials" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"kind":"pat","name":"ops-agent","employee_id":"'"$OWNER"'"}' \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
+
+# Clock in (idempotent: replay with the same key is safe)
+curl -s -X POST "localhost:8080/api/v1/organizations/$ORG/clock-in" \
+  -H "Authorization: Bearer $PAT" -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: punch-20261016-01' \
+  -d '{"employee_id":"'"$OWNER"'"}'
+
+# Create a leave policy, then request + approve leave
+POL=$(curl -s -X POST "localhost:8080/api/v1/organizations/$ORG/leave-policies" \
+  -H "Authorization: Bearer $PAT" -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: pol-20261016-01' \
+  -d '{"name":"Annual Leave","accrual_mode":"monthly","accrual_amount":1.25}' \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+
+# Unpaid here because a fresh employee has no accrued balance yet; paid
+# requests check the balance ledger and return 409 INSUFFICIENT_BALANCE.
+REQ=$(curl -s -X POST "localhost:8080/api/v1/organizations/$ORG/leave-requests" \
+  -H "Authorization: Bearer $PAT" -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: req-20261016-01' \
+  -d '{"employee_id":"'"$OWNER"'","policy_id":"'"$POL"'",
+       "start_date":"2026-12-24","end_date":"2026-12-25","is_unpaid":true}' \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+
+# Approve (chainless request: the owner decides as admin)
+curl -s -X POST "localhost:8080/api/v1/organizations/$ORG/leave-requests/$REQ/approve" \
+  -H "Authorization: Bearer $PAT" -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: appr-20261016-01' \
+  -d '{"version":1}' \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["request"]["status"])'
+# approved
+```
+
 Against Postgres (schema is auto-applied on boot):
 
 ```bash

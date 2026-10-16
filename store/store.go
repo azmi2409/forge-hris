@@ -160,6 +160,9 @@ type AuditFilter struct {
 // across the boundary, so a caller can never mutate stored state through a
 // previously returned value.
 type Store interface {
+	TimeTrackingStore
+	LeaveStore
+
 	// Organizations.
 	// CreateOrganization stores a new organization. An empty ID is
 	// generated; slug must be globally unique. Version starts at 1.

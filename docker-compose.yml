@@ -1,13 +1,14 @@
-# forge-hris — local / single-host deployment (component 1: core platform).
+# forge-hris — local / single-host deployment (components 1-3: core platform, time tracking, leave).
 #
 # Usage:
 #   cp .env.example .env   # optional; sane defaults are built in
 #   docker compose up -d
 #
 # This starts:
-#   postgres — Postgres 16, data in the pgdata volume. The component-1
-#              schema (store/migrations/001_init.sql) is applied on first
-#              init via /docker-entrypoint-initdb.d.
+#   postgres — Postgres 16, data in the pgdata volume. The schema
+#              migrations (store/migrations/001_init.sql, 002_time.sql,
+#              003_leave.sql) are applied on first init via
+#              /docker-entrypoint-initdb.d.
 #   api      — REST API on :8080. Applies the embedded schema migrations on
 #              every boot (idempotent, so upgrades are safe).
 #

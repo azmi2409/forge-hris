@@ -133,6 +133,9 @@ func (s *Server) routes() {
 		s.withAudit("credential.revoked", "credential", s.revokeCredential))
 
 	m.HandleFunc("GET /api/v1/organizations/{orgID}/audit_events", s.handleListAuditEvents)
+
+	s.timeRoutes()
+	s.leaveRoutes()
 }
 
 // --- middleware ---
@@ -209,6 +212,12 @@ func writeErrorDetails(w http.ResponseWriter, r *http.Request, status int, code,
 
 // mapError converts store sentinel errors to HTTP responses. ok=false means
 // the error was written; the handler should return.
+//
+// It covers the sentinels of all components: component 1 (identity), the
+// component 2 time-tracking sentinels (ALREADY_CLOCKED_IN, PERIOD_LOCKED,
+// INVALID_TRANSITION), and the component 3 leave sentinels
+// (INSUFFICIENT_BALANCE, NOT_CURRENT_APPROVER, INVALID_TRANSITION,
+// BULK_APPROVAL_FAILED with per-request results).
 func mapError(w http.ResponseWriter, r *http.Request, err error) bool {
 	if err == nil {
 		return true
@@ -226,15 +235,35 @@ func mapError(w http.ResponseWriter, r *http.Request, err error) bool {
 	case errors.Is(err, store.ErrCredentialInvalid):
 		writeError(w, r, http.StatusUnauthorized, "UNAUTHENTICATED",
 			"invalid, expired, or revoked credential")
+	case errors.Is(err, store.ErrAlreadyClockedIn):
+		writeError(w, r, http.StatusConflict, "ALREADY_CLOCKED_IN",
+			"employee already has an open time entry")
+	case errors.Is(err, store.ErrPeriodLocked):
+		writeError(w, r, http.StatusConflict, "PERIOD_LOCKED",
+			"entry falls in a submitted or approved pay period and cannot be changed")
+	case errors.Is(err, store.ErrInvalidTransition):
+		writeError(w, r, http.StatusConflict, "INVALID_TRANSITION",
+			"state transition not allowed: "+err.Error())
+	case errors.Is(err, store.ErrInsufficientBalance):
+		writeError(w, r, http.StatusConflict, "INSUFFICIENT_BALANCE", err.Error())
+	case errors.Is(err, store.ErrNotCurrentApprover):
+		writeError(w, r, http.StatusConflict, "NOT_CURRENT_APPROVER", err.Error())
 	default:
-		var ve *store.ValidationError
-		if errors.As(err, &ve) {
-			writeErrorDetails(w, r, http.StatusBadRequest, "VALIDATION_ERROR",
-				ve.Message, map[string]any{"field": ve.Field})
-		} else if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			writeError(w, r, http.StatusServiceUnavailable, "CANCELLED", "request cancelled")
+		var berr *store.BulkApprovalError
+		if errors.As(err, &berr) {
+			writeErrorDetails(w, r, http.StatusConflict, "BULK_APPROVAL_FAILED",
+				"bulk approval failed; nothing was applied",
+				map[string]any{"results": berr.Results})
 		} else {
-			writeError(w, r, http.StatusInternalServerError, "INTERNAL", "internal error")
+			var ve *store.ValidationError
+			if errors.As(err, &ve) {
+				writeErrorDetails(w, r, http.StatusBadRequest, "VALIDATION_ERROR",
+					ve.Message, map[string]any{"field": ve.Field})
+			} else if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				writeError(w, r, http.StatusServiceUnavailable, "CANCELLED", "request cancelled")
+			} else {
+				writeError(w, r, http.StatusInternalServerError, "INTERNAL", "internal error")
+			}
 		}
 	}
 	return false

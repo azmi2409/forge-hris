@@ -1,0 +1,1364 @@
+# OpenAPI 3.1 fragment — forge-hris component 2 (time tracking).
+#
+# MERGE NOTES FOR WORKER C (do not ship this file standalone):
+# 1. Append every entry under `paths:` into the main openapi.yaml `paths:`
+#    (the main file uses `{orgId}` in path templates — kept here too).
+# 2. Append every entry under `components.schemas:` into the main
+#    `components.schemas:`. The `Error`, `OrgId`, `Limit`, `Cursor`,
+#    `IdempotencyKey` refs already exist in the main file — do not duplicate.
+# 3. New error codes introduced: ALREADY_CLOCKED_IN (409), PERIOD_LOCKED
+#    (409), INVALID_TRANSITION (409). They are documented inline on the
+#    operations; add them to any central error-code table if one exists.
+# 4. Bump the main info.version / title to mention component 2.
+#
+# RBAC summary (mirrors api/time.go):
+# - Reads need scope time:read; writes need time:write.
+# - Members are self-scoped on entries/hour-entries/schedules/shifts.
+# - POST /time-entries (manual backfill), projects, pay-period definitions,
+#   schedules, shifts: manager+.
+# - Pay-period submit/approve/reject: manager+; reopen: admin+.
+# - clock-in/out, breaks/start, breaks/end REQUIRE an Idempotency-Key
+#   header (400 without it; replays handled by the idempotency middleware).
+#
+# Note on mapError: the component 2 sentinels are mapped in api/time.go
+# (mapTimeError), NOT in the shared mapError in api/server.go — if a central
+# error-code list is maintained, mirror the three codes there.
+
+paths:
+  /api/v1/organizations/{orgId}/clock-in:
+    post:
+      summary: Clock in
+      description: |
+        Creates an `in` time entry for the employee. Exactly one open entry
+        may exist per employee: clocking in twice returns 409
+        ALREADY_CLOCKED_IN. Requires an Idempotency-Key header.
+      operationId: clockIn
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClockRequest'
+      responses:
+        '201':
+          description: Clocked in
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TimeEntry'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: Already clocked in, or the entry falls in a frozen pay period
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/organizations/{orgId}/clock-out:
+    post:
+      summary: Clock out
+      description: |
+        Creates an `out` time entry closing the employee's open entry.
+        404 when no entry is open. Requires an Idempotency-Key header.
+      operationId: clockOut
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClockRequest'
+      responses:
+        '201':
+          description: Clocked out
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TimeEntry'
+
+  /api/v1/organizations/{orgId}/breaks/start:
+    post:
+      summary: Start a break
+      description: |
+        Creates a `start_break` entry. Requires a working open entry
+        (kind `in` or `end_break`); otherwise 409 INVALID_TRANSITION.
+        Requires an Idempotency-Key header.
+      operationId: startBreak
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClockRequest'
+      responses:
+        '201':
+          description: Break started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TimeEntry'
+
+  /api/v1/organizations/{orgId}/breaks/end:
+    post:
+      summary: End a break
+      description: |
+        Creates an `end_break` entry. Requires an open `start_break`;
+        otherwise 409 INVALID_TRANSITION. Requires an Idempotency-Key header.
+      operationId: endBreak
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClockRequest'
+      responses:
+        '201':
+          description: Break ended
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TimeEntry'
+
+  /api/v1/organizations/{orgId}/time-entries:
+    get:
+      summary: List time entries
+      description: |
+        Cursor-paginated. Shows head entries only (superseded rows excluded)
+        unless `include_history=true`; soft-deleted rows excluded unless
+        `include_deleted=true`. Members are restricted to their own entries.
+      operationId: listTimeEntries
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - name: employee_id
+          in: query
+          schema: {type: string}
+        - name: kind
+          in: query
+          schema: {$ref: '#/components/schemas/TimeEntryKind'}
+        - name: from
+          in: query
+          description: RFC3339 lower bound on occurred_at
+          schema: {type: string, format: date-time}
+        - name: to
+          in: query
+          description: RFC3339 exclusive upper bound on occurred_at
+          schema: {type: string, format: date-time}
+        - name: include_deleted
+          in: query
+          schema: {type: boolean, default: false}
+        - name: include_history
+          in: query
+          schema: {type: boolean, default: false}
+      responses:
+        '200':
+          description: Paginated time entries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TimeEntryPage'
+    post:
+      summary: Create a manual time entry (backfill)
+      description: |
+        Stores a punch without enforcing the clock state machine.
+        Manager+ only; members punch through the clock endpoints.
+      operationId: createTimeEntry
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTimeEntryRequest'
+      responses:
+        '201':
+          description: Entry created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TimeEntry'
+
+  /api/v1/organizations/{orgId}/time-entries/{entryId}:
+    get:
+      summary: Get a time entry
+      operationId: getTimeEntry
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: entryId
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: The entry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TimeEntry'
+    patch:
+      summary: Patch a time entry
+      description: |
+        Sparse update (occurred_at, project/activity/location, GPS, address,
+        client_type). Only when the entry is mutable: not locked and not
+        inside a submitted/approved pay period, otherwise 409 PERIOD_LOCKED.
+        Kind changes go through /correct.
+      operationId: patchTimeEntry
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: entryId
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchTimeEntryRequest'
+      responses:
+        '200':
+          description: Entry updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TimeEntry'
+
+  /api/v1/organizations/{orgId}/time-entries/{entryId}/correct:
+    post:
+      summary: Correct a time entry
+      description: |
+        Corrections, never edits: freezes the original entry (is_locked,
+        linked forward via next_id) and creates a superseding head entry
+        linked back via prev_id. The original must be a head entry and
+        mutable, otherwise 409 INVALID_TRANSITION / PERIOD_LOCKED.
+      operationId: correctTimeEntry
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: entryId
+          in: path
+          required: true
+          schema: {type: string}
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CorrectTimeEntryRequest'
+      responses:
+        '201':
+          description: Superseding entry created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TimeEntry'
+
+  /api/v1/organizations/{orgId}/hour-entries:
+    get:
+      summary: List hour entries
+      description: Manual hour logs. Members see only their own.
+      operationId: listHourEntries
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - name: employee_id
+          in: query
+          schema: {type: string}
+        - name: from
+          in: query
+          description: YYYY-MM-DD lower bound on work_date
+          schema: {type: string}
+        - name: to
+          in: query
+          description: YYYY-MM-DD exclusive upper bound on work_date
+          schema: {type: string}
+        - name: include_deleted
+          in: query
+          schema: {type: boolean, default: false}
+      responses:
+        '200':
+          description: Paginated hour entries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HourEntryPage'
+    post:
+      summary: Create an hour entry
+      operationId: createHourEntry
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HourEntryRequest'
+      responses:
+        '201':
+          description: Hour entry created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HourEntry'
+
+  /api/v1/organizations/{orgId}/hour-entries/{entryId}:
+    get:
+      summary: Get an hour entry
+      operationId: getHourEntry
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: entryId
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: The hour entry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HourEntry'
+    patch:
+      summary: Patch an hour entry
+      description: Version-checked. 409 PERIOD_LOCKED inside a frozen pay period.
+      operationId: patchHourEntry
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: entryId
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HourEntryRequest'
+      responses:
+        '200':
+          description: Hour entry updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HourEntry'
+    delete:
+      summary: Delete an hour entry (soft)
+      description: Version-checked soft delete.
+      operationId: deleteHourEntry
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: entryId
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version]
+              properties:
+                version:
+                  type: integer
+                  description: Optimistic concurrency token
+      responses:
+        '204':
+          description: Deleted
+
+  /api/v1/organizations/{orgId}/projects:
+    get:
+      summary: List projects
+      operationId: listProjects
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Paginated projects
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectPage'
+    post:
+      summary: Create a project
+      description: Manager+ only.
+      operationId: createProject
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProjectRequest'
+      responses:
+        '201':
+          description: Project created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+
+  /api/v1/organizations/{orgId}/projects/{projectId}:
+    get:
+      summary: Get a project
+      operationId: getProject
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: projectId
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: The project
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+    patch:
+      summary: Patch a project
+      description: Manager+ only. Version-checked.
+      operationId: patchProject
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: projectId
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProjectRequest'
+      responses:
+        '200':
+          description: Project updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+    delete:
+      summary: Delete a project
+      description: |
+        Manager+ only. Hard delete; referencing time/hour entries keep
+        their rows with project_id set to NULL.
+      operationId: deleteProject
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: projectId
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '204':
+          description: Deleted
+
+  /api/v1/organizations/{orgId}/pay-period-definitions:
+    get:
+      summary: List pay-period definitions
+      operationId: listPayPeriodDefinitions
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Paginated definitions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PayPeriodDefinitionPage'
+    post:
+      summary: Create a pay-period definition
+      description: Manager+ only.
+      operationId: createPayPeriodDefinition
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PayPeriodDefinitionRequest'
+      responses:
+        '201':
+          description: Definition created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PayPeriodDefinition'
+
+  /api/v1/organizations/{orgId}/pay-period-definitions/{definitionId}:
+    get:
+      summary: Get a pay-period definition
+      operationId: getPayPeriodDefinition
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: definitionId
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: The definition
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PayPeriodDefinition'
+    patch:
+      summary: Patch a pay-period definition
+      description: Manager+ only. Version-checked.
+      operationId: patchPayPeriodDefinition
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: definitionId
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PayPeriodDefinitionRequest'
+      responses:
+        '200':
+          description: Definition updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PayPeriodDefinition'
+    delete:
+      summary: Delete a pay-period definition
+      description: Manager+ only. 409 when pay periods still reference it.
+      operationId: deletePayPeriodDefinition
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: definitionId
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '204':
+          description: Deleted
+
+  /api/v1/organizations/{orgId}/pay-periods:
+    get:
+      summary: List pay periods
+      operationId: listPayPeriods
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - name: definition_id
+          in: query
+          schema: {type: string}
+        - name: status
+          in: query
+          schema: {$ref: '#/components/schemas/PayPeriodStatus'}
+      responses:
+        '200':
+          description: Paginated pay periods
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PayPeriodPage'
+    post:
+      summary: Generate a pay period
+      description: |
+        Manager+ only. Computes the [start, end) range from the definition's
+        cadence around period_start (defaults to now). The unique
+        (definition_id, period_start) makes regeneration idempotent-ish:
+        duplicates return 409 ALREADY_EXISTS.
+      operationId: createPayPeriod
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [definition_id]
+              properties:
+                definition_id:
+                  type: string
+                period_start:
+                  type: string
+                  format: date-time
+      responses:
+        '201':
+          description: Pay period created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PayPeriod'
+
+  /api/v1/organizations/{orgId}/pay-periods/{periodId}:
+    get:
+      summary: Get a pay period
+      operationId: getPayPeriod
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: periodId
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: The pay period
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PayPeriod'
+
+  /api/v1/organizations/{orgId}/pay-periods/{periodId}/submit:
+    post:
+      summary: Submit a pay period
+      description: |
+        Manager+ only. Open/Reopened/Rejected -> Submitted. Freezes the
+        period's entries (409 PERIOD_LOCKED on writes) while awaiting a
+        decision.
+      operationId: submitPayPeriod
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: periodId
+          in: path
+          required: true
+          schema: {type: string}
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VersionRequest'
+      responses:
+        '200':
+          description: Period submitted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PayPeriod'
+
+  /api/v1/organizations/{orgId}/pay-periods/{periodId}/approve:
+    post:
+      summary: Approve a pay period
+      description: |
+        Manager+ only. Submitted -> Approved. Locks every entry the period
+        covers (is_locked); reopening unlocks them.
+      operationId: approvePayPeriod
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: periodId
+          in: path
+          required: true
+          schema: {type: string}
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VersionRequest'
+      responses:
+        '200':
+          description: Period approved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PayPeriod'
+
+  /api/v1/organizations/{orgId}/pay-periods/{periodId}/reject:
+    post:
+      summary: Reject a pay period
+      description: Manager+ only. Submitted -> Rejected (may be resubmitted).
+      operationId: rejectPayPeriod
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: periodId
+          in: path
+          required: true
+          schema: {type: string}
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VersionRequest'
+      responses:
+        '200':
+          description: Period rejected
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PayPeriod'
+
+  /api/v1/organizations/{orgId}/pay-periods/{periodId}/reopen:
+    post:
+      summary: Reopen a pay period
+      description: Admin+ only. Approved -> Reopened. Unlocks covered entries.
+      operationId: reopenPayPeriod
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: periodId
+          in: path
+          required: true
+          schema: {type: string}
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VersionRequest'
+      responses:
+        '200':
+          description: Period reopened
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PayPeriod'
+
+  /api/v1/organizations/{orgId}/schedules:
+    get:
+      summary: List schedules
+      description: Members see only their own schedules.
+      operationId: listSchedules
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - name: employee_id
+          in: query
+          schema: {type: string}
+      responses:
+        '200':
+          description: Paginated schedules
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SchedulePage'
+    post:
+      summary: Create a schedule
+      description: Manager+ only.
+      operationId: createSchedule
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScheduleRequest'
+      responses:
+        '201':
+          description: Schedule created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Schedule'
+
+  /api/v1/organizations/{orgId}/schedules/{scheduleId}:
+    get:
+      summary: Get a schedule
+      operationId: getSchedule
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: scheduleId
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: The schedule
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Schedule'
+    patch:
+      summary: Patch a schedule
+      description: Manager+ only. Version-checked.
+      operationId: patchSchedule
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: scheduleId
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScheduleRequest'
+      responses:
+        '200':
+          description: Schedule updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Schedule'
+    delete:
+      summary: Delete a schedule
+      description: Manager+ only.
+      operationId: deleteSchedule
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: scheduleId
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '204':
+          description: Deleted
+
+  /api/v1/organizations/{orgId}/shifts:
+    get:
+      summary: List shifts
+      description: Members see only their own shifts.
+      operationId: listShifts
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - name: employee_id
+          in: query
+          schema: {type: string}
+        - name: from
+          in: query
+          description: YYYY-MM-DD lower bound on shift_date
+          schema: {type: string}
+        - name: to
+          in: query
+          description: YYYY-MM-DD exclusive upper bound on shift_date
+          schema: {type: string}
+        - name: published
+          in: query
+          schema: {type: boolean}
+      responses:
+        '200':
+          description: Paginated shifts
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ShiftPage'
+    post:
+      summary: Create a shift
+      description: Manager+ only.
+      operationId: createShift
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ShiftRequest'
+      responses:
+        '201':
+          description: Shift created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Shift'
+
+  /api/v1/organizations/{orgId}/shifts/publish:
+    post:
+      summary: Bulk-publish shifts
+      description: |
+        Manager+ only. Marks draft shifts published (visible to employees).
+        Idempotent: already-published shifts are skipped. Returns the count
+        newly published.
+      operationId: publishShifts
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids:
+                  type: array
+                  items: {type: string}
+      responses:
+        '200':
+          description: Publish count
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [published]
+                properties:
+                  published:
+                    type: integer
+                    example: 3
+
+  /api/v1/organizations/{orgId}/shifts/{shiftId}:
+    get:
+      summary: Get a shift
+      operationId: getShift
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: shiftId
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: The shift
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Shift'
+    patch:
+      summary: Patch a shift
+      description: Manager+ only. Version-checked.
+      operationId: patchShift
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: shiftId
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ShiftRequest'
+      responses:
+        '200':
+          description: Shift updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Shift'
+    delete:
+      summary: Delete a shift
+      description: Manager+ only.
+      operationId: deleteShift
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: shiftId
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '204':
+          description: Deleted
+
+  /api/v1/organizations/{orgId}/overtime/preview:
+    post:
+      summary: Preview overtime for a date range
+      description: |
+        Read-only: lists the employee's time entries over [from, to) and
+        runs the pure overtime engine. Members may only preview their own
+        hours. No audit event, no idempotency key needed.
+      operationId: previewOvertime
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OvertimePreviewRequest'
+      responses:
+        '200':
+          description: Overtime breakdown
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OvertimePreviewResponse'
+
+components:
+  responses:
+    BadRequest:
+      description: Malformed JSON or a failed validation (VALIDATION_ERROR envelope).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+      # MERGE NOTE: the main openapi.yaml has no BadRequest response yet —
+      # copy this entry into its components.responses.
+
+  schemas:
+    TimeEntryKind:
+      type: string
+      enum: [in, out, start_break, end_break]
+
+    TimeEntryClientType:
+      type: string
+      enum: [web, mobile, desktop, kiosk, ai_assistant]
+
+    TimeEntry:
+      type: object
+      required: [id, organization_id, employee_id, kind, occurred_at, client_type, is_locked, version, created_at, updated_at]
+      properties:
+        id: {type: string}
+        organization_id: {type: string}
+        employee_id: {type: string}
+        kind: {$ref: '#/components/schemas/TimeEntryKind'}
+        occurred_at: {type: string, format: date-time}
+        project_id: {type: string, nullable: true}
+        activity_id: {type: string, nullable: true, description: Forward reference; activities land in a later component}
+        location_id: {type: string, nullable: true, description: Forward reference; locations land in a later component}
+        latitude: {type: number, nullable: true}
+        longitude: {type: number, nullable: true}
+        address: {type: string, nullable: true}
+        client_type: {$ref: '#/components/schemas/TimeEntryClientType'}
+        prev_id: {type: string, nullable: true, description: Correction chain backlink}
+        next_id: {type: string, nullable: true, description: Set when superseded by a correction}
+        is_locked: {type: boolean, description: Frozen by correction or pay-period approval}
+        version: {type: integer}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        deleted_at: {type: string, format: date-time, nullable: true}
+
+    TimeEntryPage:
+      type: object
+      required: [data, next_cursor, has_more]
+      properties:
+        data:
+          type: array
+          items: {$ref: '#/components/schemas/TimeEntry'}
+        next_cursor: {type: string}
+        has_more: {type: boolean}
+
+    ClockRequest:
+      type: object
+      properties:
+        employee_id:
+          type: string
+          description: Defaults to the caller's employee; members may only name themselves
+        occurred_at:
+          type: string
+          format: date-time
+          description: Defaults to now
+        project_id: {type: string}
+        activity_id: {type: string}
+        location_id: {type: string}
+        latitude: {type: number}
+        longitude: {type: number}
+        address: {type: string}
+        client_type:
+          $ref: '#/components/schemas/TimeEntryClientType'
+          default: web
+
+    CreateTimeEntryRequest:
+      allOf:
+        - $ref: '#/components/schemas/ClockRequest'
+        - type: object
+          required: [employee_id, kind]
+          properties:
+            kind: {$ref: '#/components/schemas/TimeEntryKind'}
+
+    PatchTimeEntryRequest:
+      type: object
+      required: [version]
+      properties:
+        occurred_at: {type: string, format: date-time}
+        project_id: {type: string, nullable: true}
+        activity_id: {type: string, nullable: true}
+        location_id: {type: string, nullable: true}
+        latitude: {type: number}
+        longitude: {type: number}
+        address: {type: string}
+        client_type: {$ref: '#/components/schemas/TimeEntryClientType'}
+        version: {type: integer, description: Optimistic concurrency token}
+
+    CorrectTimeEntryRequest:
+      allOf:
+        - $ref: '#/components/schemas/ClockRequest'
+        - type: object
+          required: [kind]
+          properties:
+            kind: {$ref: '#/components/schemas/TimeEntryKind'}
+
+    HourEntry:
+      type: object
+      required: [id, organization_id, employee_id, work_date, hours, version, created_at, updated_at]
+      properties:
+        id: {type: string}
+        organization_id: {type: string}
+        employee_id: {type: string}
+        work_date: {type: string, format: date, example: '2026-10-12'}
+        hours: {type: number}
+        project_id: {type: string, nullable: true}
+        note: {type: string}
+        version: {type: integer}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        deleted_at: {type: string, format: date-time, nullable: true}
+
+    HourEntryPage:
+      type: object
+      required: [data, next_cursor, has_more]
+      properties:
+        data:
+          type: array
+          items: {$ref: '#/components/schemas/HourEntry'}
+        next_cursor: {type: string}
+        has_more: {type: boolean}
+
+    HourEntryRequest:
+      type: object
+      required: [work_date, hours]
+      properties:
+        employee_id: {type: string}
+        work_date: {type: string, format: date, example: '2026-10-12'}
+        hours: {type: number}
+        project_id: {type: string, nullable: true}
+        note: {type: string}
+        version: {type: integer, description: PATCH only — optimistic concurrency token}
+
+    Project:
+      type: object
+      required: [id, organization_id, name, version, created_at, updated_at]
+      properties:
+        id: {type: string}
+        organization_id: {type: string}
+        name: {type: string}
+        client_name: {type: string}
+        version: {type: integer}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+
+    ProjectPage:
+      type: object
+      required: [data, next_cursor, has_more]
+      properties:
+        data:
+          type: array
+          items: {$ref: '#/components/schemas/Project'}
+        next_cursor: {type: string}
+        has_more: {type: boolean}
+
+    ProjectRequest:
+      type: object
+      required: [name]
+      properties:
+        name: {type: string}
+        client_name: {type: string}
+        version: {type: integer, description: PATCH only — optimistic concurrency token}
+
+    PayPeriodCadence:
+      type: string
+      enum: [Monthly, TwiceInMonth, Weekly]
+
+    PayPeriodDefinition:
+      type: object
+      required: [id, organization_id, name, cadence, anchor_day, version, created_at, updated_at]
+      properties:
+        id: {type: string}
+        organization_id: {type: string}
+        name: {type: string}
+        cadence: {$ref: '#/components/schemas/PayPeriodCadence'}
+        anchor_day:
+          type: integer
+          description: Day-of-month for Monthly (1-31, clamped), weekday 0=Sunday for Weekly; ignored for TwiceInMonth
+        version: {type: integer}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+
+    PayPeriodDefinitionPage:
+      type: object
+      required: [data, next_cursor, has_more]
+      properties:
+        data:
+          type: array
+          items: {$ref: '#/components/schemas/PayPeriodDefinition'}
+        next_cursor: {type: string}
+        has_more: {type: boolean}
+
+    PayPeriodDefinitionRequest:
+      type: object
+      required: [name, cadence]
+      properties:
+        name: {type: string}
+        cadence: {$ref: '#/components/schemas/PayPeriodCadence'}
+        anchor_day: {type: integer, default: 1}
+        version: {type: integer, description: PATCH only — optimistic concurrency token}
+
+    PayPeriodStatus:
+      type: string
+      enum: [Open, Submitted, Approved, Rejected, Reopened]
+
+    PayPeriod:
+      type: object
+      required: [id, organization_id, definition_id, period_start, period_end, status, version, created_at, updated_at]
+      properties:
+        id: {type: string}
+        organization_id: {type: string}
+        definition_id: {type: string}
+        period_start: {type: string, format: date-time}
+        period_end: {type: string, format: date-time}
+        status: {$ref: '#/components/schemas/PayPeriodStatus'}
+        version: {type: integer}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+
+    PayPeriodPage:
+      type: object
+      required: [data, next_cursor, has_more]
+      properties:
+        data:
+          type: array
+          items: {$ref: '#/components/schemas/PayPeriod'}
+        next_cursor: {type: string}
+        has_more: {type: boolean}
+
+    VersionRequest:
+      type: object
+      required: [version]
+      properties:
+        version: {type: integer, description: Optimistic concurrency token}
+
+    ScheduleKind:
+      type: string
+      enum: [Fixed, Flexible, Weekly]
+
+    Schedule:
+      type: object
+      required: [id, organization_id, employee_id, kind, expected_daily_hours, version, created_at, updated_at]
+      properties:
+        id: {type: string}
+        organization_id: {type: string}
+        employee_id: {type: string}
+        kind: {$ref: '#/components/schemas/ScheduleKind'}
+        expected_daily_hours: {type: number}
+        version: {type: integer}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+
+    SchedulePage:
+      type: object
+      required: [data, next_cursor, has_more]
+      properties:
+        data:
+          type: array
+          items: {$ref: '#/components/schemas/Schedule'}
+        next_cursor: {type: string}
+        has_more: {type: boolean}
+
+    ScheduleRequest:
+      type: object
+      required: [kind]
+      properties:
+        employee_id: {type: string}
+        kind: {$ref: '#/components/schemas/ScheduleKind'}
+        expected_daily_hours: {type: number, default: 8}
+        version: {type: integer, description: PATCH only — optimistic concurrency token}
+
+    Shift:
+      type: object
+      required: [id, organization_id, employee_id, shift_date, starts_at, ends_at, published, version, created_at, updated_at]
+      properties:
+        id: {type: string}
+        organization_id: {type: string}
+        employee_id: {type: string}
+        shift_date: {type: string, format: date, example: '2026-10-19'}
+        starts_at: {type: string, format: date-time}
+        ends_at: {type: string, format: date-time}
+        published: {type: boolean}
+        version: {type: integer}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+
+    ShiftPage:
+      type: object
+      required: [data, next_cursor, has_more]
+      properties:
+        data:
+          type: array
+          items: {$ref: '#/components/schemas/Shift'}
+        next_cursor: {type: string}
+        has_more: {type: boolean}
+
+    ShiftRequest:
+      type: object
+      required: [shift_date, starts_at, ends_at]
+      properties:
+        employee_id: {type: string}
+        shift_date: {type: string, format: date, example: '2026-10-19'}
+        starts_at: {type: string, format: date-time}
+        ends_at: {type: string, format: date-time}
+        published: {type: boolean}
+        version: {type: integer, description: PATCH only — optimistic concurrency token}
+
+    OvertimeRules:
+      type: object
+      required: [daily_threshold_hours, double_threshold_hours, weekly_threshold_hours, overtime_mult, double_mult, rest_day_mult, holiday_mult]
+      properties:
+        daily_threshold_hours: {type: number, description: Regular hours/day before 1.5x; <=0 disables the tier}
+        double_threshold_hours: {type: number, description: Hours/day before 2x; <= daily disables the tier}
+        weekly_threshold_hours: {type: number, description: Regular hours/ISO-week before weekly 1.5x; <=0 disables}
+        overtime_mult: {type: number, example: 1.5}
+        double_mult: {type: number, example: 2}
+        rest_day_mult: {type: number, example: 2}
+        holiday_mult: {type: number, example: 3}
+
+    OvertimeResult:
+      type: object
+      required: [regular_hours, overtime_15, overtime_2x, rest_day_hours, holiday_hours]
+      properties:
+        regular_hours: {type: number}
+        overtime_15: {type: number, description: Hours at overtime_mult (daily tier + weekly overflow)}
+        overtime_2x: {type: number, description: Hours at double_mult}
+        rest_day_hours: {type: number, description: Weekend hours at rest_day_mult}
+        holiday_hours: {type: number, description: Public-holiday hours at holiday_mult}
+
+    OvertimePreviewRequest:
+      type: object
+      required: [from, to, rules]
+      properties:
+        employee_id: {type: string, description: Defaults to the caller's employee; members may only name themselves}
+        from: {type: string, format: date, example: '2026-10-01'}
+        to: {type: string, format: date, example: '2026-11-01', description: Exclusive}
+        rules: {$ref: '#/components/schemas/OvertimeRules'}
+        holidays:
+          type: array
+          items: {type: string, format: date}
+          description: Public holidays as YYYY-MM-DD
+
+    OvertimePreviewResponse:
+      type: object
+      required: [employee_id, from, to, entries, result]
+      properties:
+        employee_id: {type: string}
+        from: {type: string}
+        to: {type: string}
+        entries: {type: integer, description: Number of entries the preview ran over}
+        result: {$ref: '#/components/schemas/OvertimeResult'}

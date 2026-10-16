@@ -32,6 +32,13 @@ type MemoryStore struct {
 	auditLast   map[string]string            // orgID -> hash of latest event
 	idem        map[string]IdempotencyRecord // orgID + "\x00" + key
 	auditSeq    atomic.Int64
+	// --- leave (component 3; Worker A owns the time-tracking block) ---
+	leavePolicies    map[string]TimeOffPolicy   // orgID + "\x00" + id
+	leaveBalances    map[string]LeaveBalance    // orgID + "\x00" + employeeID + "\x00" + policyID + "\x00" + period
+	leaveRequests    map[string]TimeOffRequest  // orgID + "\x00" + id
+	leaveApprovals   map[string]TimeOffApproval // orgID + "\x00" + id
+	holidayCalendars map[string]HolidayCalendar // orgID + "\x00" + id
+	holidays         map[string]Holiday         // orgID + "\x00" + id
 }
 
 // NewMemoryStore returns an empty MemoryStore.
@@ -48,6 +55,13 @@ func NewMemoryStore() *MemoryStore {
 		credHashes:  make(map[string]string),
 		auditLast:   make(map[string]string),
 		idem:        make(map[string]IdempotencyRecord),
+		// --- leave (component 3) ---
+		leavePolicies:    make(map[string]TimeOffPolicy),
+		leaveBalances:    make(map[string]LeaveBalance),
+		leaveRequests:    make(map[string]TimeOffRequest),
+		leaveApprovals:   make(map[string]TimeOffApproval),
+		holidayCalendars: make(map[string]HolidayCalendar),
+		holidays:         make(map[string]Holiday),
 	}
 }
 

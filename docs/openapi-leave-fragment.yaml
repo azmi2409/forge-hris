@@ -1,0 +1,1033 @@
+# OpenAPI 3.1 fragment — forge-hris component 3 (leave).
+#
+# Worker C merges this into docs/openapi.yaml:
+#   - append `paths` entries under the existing `paths:`
+#   - merge `components.schemas`, `components.responses`, `components.parameters`
+#     into the existing `components:`
+#   - extend the info.description title to mention component 3.
+#
+# Conventions follow docs/openapi.yaml: flat error envelope
+# {"code","message","details","request_id"}, cursor pagination
+# {data, next_cursor, has_more}, Idempotency-Key on POSTs.
+
+paths:
+  /api/v1/organizations/{orgId}/leave-policies:
+    post:
+      summary: Create a time-off policy
+      description: |
+        Creates a leave policy with its accrual engine (annually, monthly,
+        pay_period, payroll_hours), carry-forward cap, and expiry rule.
+        Requires manager role or higher.
+      operationId: createLeavePolicy
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, accrual_mode]
+              properties:
+                name: { type: string, example: Annual Leave }
+                accrual_mode:
+                  type: string
+                  enum: [annually, monthly, pay_period, payroll_hours]
+                accrual_amount:
+                  type: number
+                  description: Days granted per accrual period.
+                  example: 1.25
+                carry_forward_cap:
+                  type: number
+                  description: Max days carried into the next period; 0 disables.
+                expiry_months:
+                  type: integer
+                  description: Months after period end when carried leave lapses; 0 never expires.
+      responses:
+        '201':
+          description: Policy created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TimeOffPolicy' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    get:
+      summary: List time-off policies
+      operationId: listLeavePolicies
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Paginated policies
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TimeOffPolicyList' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/organizations/{orgId}/leave-policies/{policyId}:
+    get:
+      summary: Get a time-off policy
+      operationId: getLeavePolicy
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: policyId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: The policy
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TimeOffPolicy' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      summary: Update a time-off policy
+      description: Optimistic concurrency — `version` must match the stored version.
+      operationId: updateLeavePolicy
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: policyId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version]
+              properties:
+                name: { type: string }
+                accrual_mode:
+                  type: string
+                  enum: [annually, monthly, pay_period, payroll_hours]
+                accrual_amount: { type: number }
+                carry_forward_cap: { type: number }
+                expiry_months: { type: integer }
+                version: { type: integer, description: Must match the stored version. }
+      responses:
+        '200':
+          description: Policy updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TimeOffPolicy' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/VersionConflict' }
+    delete:
+      summary: Delete a time-off policy
+      description: Only when no requests or balances reference it (else 409 POLICY_NOT_EMPTY).
+      operationId: deleteLeavePolicy
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: policyId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '204': { description: Policy deleted }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/NotEmpty' }
+
+  /api/v1/organizations/{orgId}/leave-balances:
+    get:
+      summary: List leave balances
+      description: Filter by employee_id, policy_id, period (YYYY).
+      operationId: listLeaveBalances
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: employee_id
+          in: query
+          schema: { type: string }
+        - name: policy_id
+          in: query
+          schema: { type: string }
+        - name: period
+          in: query
+          description: Annual period label, e.g. 2026.
+          schema: { type: string }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Paginated balances
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LeaveBalanceList' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/organizations/{orgId}/leave-balances/recalculate:
+    post:
+      summary: Recalculate a leave balance
+      description: |
+        Recomputes the employee's balance for as_of's year from the policy,
+        tenure, and paid requested/approved requests (working days via the
+        optional holiday calendar), applies carry-forward from the stored
+        previous-period balance and expiry, then upserts the result.
+        Idempotent: same inputs, same stored balance. Members may only
+        recalculate their own balance.
+      operationId: recalculateLeaveBalance
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [employee_id, policy_id]
+              properties:
+                employee_id: { type: string }
+                policy_id: { type: string }
+                as_of:
+                  type: string
+                  format: date-time
+                  description: Defaults to now.
+                holiday_calendar_id:
+                  type: string
+                  description: Holidays excluded from working-day counts.
+      responses:
+        '200':
+          description: Recalculated balance
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LeaveBalance' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/organizations/{orgId}/leave-requests:
+    post:
+      summary: Create a leave request
+      description: |
+        Creates a request with status `requested`. `days` is computed
+        server-side from dates and holidays. Paid requests check the
+        recalculated balance (409 INSUFFICIENT_BALANCE when short); unpaid
+        requests skip the check (component 5 deducts them from pay instead).
+        The approval chain defaults to the employee's manager; an explicit
+        `approver_ids` chain requires manager role or higher. A snapshot of
+        the policy rules and the balance at request time is frozen onto the
+        request. Members may only request for themselves.
+      operationId: createLeaveRequest
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [employee_id, policy_id, start_date, end_date]
+              properties:
+                employee_id: { type: string }
+                policy_id: { type: string }
+                start_date: { type: string, format: date, example: '2026-12-24' }
+                end_date: { type: string, format: date, example: '2026-12-31' }
+                is_unpaid: { type: boolean, default: false }
+                holiday_calendar_id: { type: string }
+                approver_ids:
+                  type: array
+                  items: { type: string }
+                  description: Ordered approver chain; overrides the manager default.
+      responses:
+        '201':
+          description: Request created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TimeOffRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/InsufficientBalance' }
+    get:
+      summary: List leave requests
+      description: Filter by employee_id, policy_id, status.
+      operationId: listLeaveRequests
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: employee_id
+          in: query
+          schema: { type: string }
+        - name: policy_id
+          in: query
+          schema: { type: string }
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [requested, approved, rejected, cancelled]
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Paginated requests
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TimeOffRequestList' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/organizations/{orgId}/leave-requests/bulk-approve:
+    post:
+      summary: Bulk-approve leave requests (two-phase)
+      description: |
+        Two-phase: `{ids, preview: true}` returns per-request approvability
+        without mutating; `{ids, preview: false}` approves every listed
+        request or none (all-or-nothing; 409 BULK_APPROVAL_FAILED with
+        per-request reasons when any request fails). The confirm accepts
+        Idempotency-Key and is idempotent. Requires the leave:approve scope;
+        each request must be decidable by the caller (current chain approver
+        or admin).
+      operationId: bulkApproveLeaveRequests
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids:
+                  type: array
+                  items: { type: string }
+                preview: { type: boolean, default: false }
+      responses:
+        '200':
+          description: Preview results, or the approved requests on confirm
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/BulkApprovePreview'
+                  - $ref: '#/components/schemas/BulkApproveResult'
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/BulkApprovalFailed' }
+
+  /api/v1/organizations/{orgId}/leave-requests/{id}:
+    get:
+      summary: Get a leave request
+      operationId: getLeaveRequest
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: The request
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TimeOffRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      summary: Update a leave request
+      description: Only `requested` requests can be edited (409 INVALID_TRANSITION otherwise). `version` must match.
+      operationId: updateLeaveRequest
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version]
+              properties:
+                start_date: { type: string, format: date }
+                end_date: { type: string, format: date }
+                is_unpaid: { type: boolean }
+                holiday_calendar_id: { type: string }
+                version: { type: integer }
+      responses:
+        '200':
+          description: Request updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TimeOffRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/InvalidTransition' }
+
+  /api/v1/organizations/{orgId}/leave-requests/{id}/cancel:
+    post:
+      summary: Cancel a leave request
+      description: Allowed from `requested` or `approved`. Members may only cancel their own.
+      operationId: cancelLeaveRequest
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version]
+              properties:
+                version: { type: integer }
+      responses:
+        '200':
+          description: Request cancelled
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TimeOffRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/InvalidTransition' }
+
+  /api/v1/organizations/{orgId}/leave-requests/{id}/approve:
+    post:
+      summary: Approve a leave request (chain-aware)
+      description: |
+        Requires the leave:approve scope AND being the current pending
+        approver (or admin). Approving advances the chain; when no pending
+        steps remain the request becomes `approved`.
+      operationId: approveLeaveRequest
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version]
+              properties:
+                version: { type: integer, description: Request version for optimistic concurrency. }
+      responses:
+        '200':
+          description: Decision recorded
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApprovalDecision' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/NotCurrentApprover' }
+
+  /api/v1/organizations/{orgId}/leave-requests/{id}/reject:
+    post:
+      summary: Reject a leave request (chain-aware)
+      description: |
+        Requires the leave:approve scope AND being the current pending
+        approver (or admin). Any rejection makes the request `rejected`
+        (short-circuits the chain).
+      operationId: rejectLeaveRequest
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version]
+              properties:
+                version: { type: integer }
+      responses:
+        '200':
+          description: Decision recorded
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApprovalDecision' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/NotCurrentApprover' }
+
+  /api/v1/organizations/{orgId}/leave-requests/{id}/approvals:
+    get:
+      summary: List a request's approval chain
+      description: Steps ordered by sequence; the current step is the lowest-sequence pending one.
+      operationId: listLeaveApprovals
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Paginated approval steps
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TimeOffApprovalList' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      summary: Append an approval step
+      description: Requires manager role or higher. Only on `requested` requests.
+      operationId: addLeaveApproval
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [approver_employee_id]
+              properties:
+                approver_employee_id: { type: string }
+                sequence:
+                  type: integer
+                  description: 1-based; omitted auto-assigns max+1.
+      responses:
+        '201':
+          description: Step created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TimeOffApproval' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/InvalidTransition' }
+
+  /api/v1/organizations/{orgId}/holiday-calendars:
+    post:
+      summary: Create a holiday calendar
+      operationId: createHolidayCalendar
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, country_code]
+              properties:
+                name: { type: string, example: Malaysia Public Holidays }
+                country_code: { type: string, enum: [MY, ID] }
+      responses:
+        '201':
+          description: Calendar created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HolidayCalendar' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    get:
+      summary: List holiday calendars
+      operationId: listHolidayCalendars
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Paginated calendars
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HolidayCalendarList' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/organizations/{orgId}/holiday-calendars/{calendarID}:
+    get:
+      summary: Get a holiday calendar
+      operationId: getHolidayCalendar
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: calendarID
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: The calendar
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HolidayCalendar' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      summary: Update a holiday calendar
+      operationId: updateHolidayCalendar
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: calendarID
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version]
+              properties:
+                name: { type: string }
+                country_code: { type: string, enum: [MY, ID] }
+                version: { type: integer }
+      responses:
+        '200':
+          description: Calendar updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HolidayCalendar' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/VersionConflict' }
+    delete:
+      summary: Delete a holiday calendar
+      description: Only when it has no holidays (else 409 CALENDAR_NOT_EMPTY).
+      operationId: deleteHolidayCalendar
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: calendarID
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '204': { description: Calendar deleted }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/NotEmpty' }
+
+  /api/v1/organizations/{orgId}/holiday-calendars/{calendarID}/holidays:
+    post:
+      summary: Add a holiday
+      description: (calendar_id, date) must be unique.
+      operationId: createHoliday
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: calendarID
+          in: path
+          required: true
+          schema: { type: string }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [date, name]
+              properties:
+                date: { type: string, format: date, example: '2026-01-01' }
+                name: { type: string, example: New Year's Day }
+      responses:
+        '201':
+          description: Holiday created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Holiday' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/AlreadyExists' }
+    get:
+      summary: List holidays
+      description: Ordered by date.
+      operationId: listHolidays
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: calendarID
+          in: path
+          required: true
+          schema: { type: string }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Paginated holidays
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HolidayList' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/organizations/{orgId}/holiday-calendars/{calendarID}/holidays/{holidayID}:
+    delete:
+      summary: Delete a holiday
+      operationId: deleteHoliday
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: calendarID
+          in: path
+          required: true
+          schema: { type: string }
+        - name: holidayID
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '204': { description: Holiday deleted }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/organizations/{orgId}/who-is-on-leave:
+    get:
+      summary: Who is on leave
+      description: Approved leave requests (paid and unpaid) overlapping the date.
+      operationId: whoIsOnLeave
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: date
+          in: query
+          description: YYYY-MM-DD; defaults to today (UTC).
+          schema: { type: string, format: date }
+      responses:
+        '200':
+          description: People on leave
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WhoIsOnLeave' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+components:
+  responses:
+    InsufficientBalance:
+      description: Paid request exceeds the available balance.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            insufficient:
+              value:
+                code: INSUFFICIENT_BALANCE
+                message: 'store: insufficient leave balance: need 5.00 days, have 3.00'
+                request_id: abc123
+    NotCurrentApprover:
+      description: Caller is not the current pending approver (and not an admin).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            notApprover:
+              value:
+                code: NOT_CURRENT_APPROVER
+                message: 'store: not the current approver: current approver is <id>'
+                request_id: abc123
+    InvalidTransition:
+      description: Status change not allowed from the current status.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            invalid:
+              value:
+                code: INVALID_TRANSITION
+                message: 'store: invalid status transition: cannot cancel a rejected request'
+                request_id: abc123
+    BulkApprovalFailed:
+      description: Bulk approval failed for at least one request; nothing was applied.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            bulkFailed:
+              value:
+                code: BULK_APPROVAL_FAILED
+                message: 'bulk approval failed; nothing was applied'
+                details:
+                  results:
+                    - request_id: req-1
+                      approved: true
+                    - request_id: req-2
+                      approved: false
+                      reason: not the current approver
+                request_id: abc123
+    VersionConflict:
+      description: Resource changed since it was read; GET it again and retry.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            conflict:
+              value:
+                code: VERSION_CONFLICT
+                message: resource changed since it was read; GET it again and retry
+                request_id: abc123
+    NotEmpty:
+      description: Resource still has dependents and cannot be deleted.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            notEmpty:
+              value:
+                code: GROUP_NOT_EMPTY
+                message: policy still has leave requests
+                request_id: abc123
+    AlreadyExists:
+      description: Resource already exists.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            exists:
+              value:
+                code: ALREADY_EXISTS
+                message: holiday on 2026-01-01
+                request_id: abc123
+
+  schemas:
+    TimeOffPolicy:
+      type: object
+      required: [id, organization_id, name, accrual_mode, accrual_amount, carry_forward_cap, expiry_months, created_at, updated_at, version]
+      properties:
+        id: { type: string }
+        organization_id: { type: string }
+        name: { type: string }
+        accrual_mode:
+          type: string
+          enum: [annually, monthly, pay_period, payroll_hours]
+        accrual_amount: { type: number }
+        carry_forward_cap: { type: number }
+        expiry_months: { type: integer }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        version: { type: integer }
+    TimeOffPolicyList:
+      type: object
+      required: [data, next_cursor, has_more]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/TimeOffPolicy' }
+        next_cursor: { type: string }
+        has_more: { type: boolean }
+
+    LeaveBalance:
+      type: object
+      required: [id, organization_id, employee_id, policy_id, period, accrued, taken, carried, expired, balance, computed_at, created_at, updated_at, version]
+      properties:
+        id: { type: string }
+        organization_id: { type: string }
+        employee_id: { type: string }
+        policy_id: { type: string }
+        period: { type: string, example: '2026' }
+        accrued: { type: number }
+        taken: { type: number }
+        carried: { type: number }
+        expired: { type: number }
+        balance: { type: number, description: accrued + carried - expired - taken, floored at 0 }
+        computed_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        version: { type: integer }
+    LeaveBalanceList:
+      type: object
+      required: [data, next_cursor, has_more]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/LeaveBalance' }
+        next_cursor: { type: string }
+        has_more: { type: boolean }
+
+    TimeOffRequest:
+      type: object
+      required: [id, organization_id, employee_id, policy_id, start_date, end_date, days, status, is_unpaid, created_at, updated_at, version]
+      properties:
+        id: { type: string }
+        organization_id: { type: string }
+        employee_id: { type: string }
+        policy_id: { type: string }
+        holiday_calendar_id: { type: string, nullable: true }
+        start_date: { type: string, format: date }
+        end_date: { type: string, format: date }
+        days: { type: number, description: Server-computed working days. }
+        snapshot:
+          type: object
+          nullable: true
+          description: Frozen policy rules + balance at request time.
+        status:
+          type: string
+          enum: [requested, approved, rejected, cancelled]
+        is_unpaid: { type: boolean, description: Skips balance checks; component 5 deducts from pay. }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        version: { type: integer }
+    TimeOffRequestList:
+      type: object
+      required: [data, next_cursor, has_more]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/TimeOffRequest' }
+        next_cursor: { type: string }
+        has_more: { type: boolean }
+
+    TimeOffApproval:
+      type: object
+      required: [id, organization_id, request_id, sequence, approver_employee_id, status, created_at]
+      properties:
+        id: { type: string }
+        organization_id: { type: string }
+        request_id: { type: string }
+        sequence: { type: integer, description: 1-based; current step is the lowest-sequence pending one. }
+        approver_employee_id: { type: string }
+        status:
+          type: string
+          enum: [pending, approved, rejected]
+        decided_by: { type: string, nullable: true }
+        decided_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+    TimeOffApprovalList:
+      type: object
+      required: [data, next_cursor, has_more]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/TimeOffApproval' }
+        next_cursor: { type: string }
+        has_more: { type: boolean }
+
+    ApprovalDecision:
+      type: object
+      required: [request, approvals]
+      properties:
+        request: { $ref: '#/components/schemas/TimeOffRequest' }
+        approvals:
+          type: array
+          items: { $ref: '#/components/schemas/TimeOffApproval' }
+
+    BulkApprovePreview:
+      type: object
+      required: [results]
+      properties:
+        results:
+          type: array
+          items:
+            type: object
+            required: [request_id, can_approve]
+            properties:
+              request_id: { type: string }
+              can_approve: { type: boolean }
+              reason: { type: string }
+              current_approver: { type: string, nullable: true }
+              status: { type: string, nullable: true }
+    BulkApproveResult:
+      type: object
+      required: [approved]
+      properties:
+        approved:
+          type: array
+          items: { $ref: '#/components/schemas/TimeOffRequest' }
+
+    HolidayCalendar:
+      type: object
+      required: [id, organization_id, name, country_code, created_at, updated_at, version]
+      properties:
+        id: { type: string }
+        organization_id: { type: string }
+        name: { type: string }
+        country_code: { type: string, enum: [MY, ID] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        version: { type: integer }
+    HolidayCalendarList:
+      type: object
+      required: [data, next_cursor, has_more]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/HolidayCalendar' }
+        next_cursor: { type: string }
+        has_more: { type: boolean }
+
+    Holiday:
+      type: object
+      required: [id, organization_id, calendar_id, date, name, created_at]
+      properties:
+        id: { type: string }
+        organization_id: { type: string }
+        calendar_id: { type: string }
+        date: { type: string, format: date }
+        name: { type: string }
+        created_at: { type: string, format: date-time }
+    HolidayList:
+      type: object
+      required: [data, next_cursor, has_more]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/Holiday' }
+        next_cursor: { type: string }
+        has_more: { type: boolean }
+
+    WhoIsOnLeave:
+      type: object
+      required: [date, on_leave]
+      properties:
+        date: { type: string, format: date }
+        on_leave:
+          type: array
+          items:
+            type: object
+            required: [request_id, employee_id, employee_name, policy_id, policy_name, start_date, end_date, is_unpaid]
+            properties:
+              request_id: { type: string }
+              employee_id: { type: string }
+              employee_name: { type: string }
+              policy_id: { type: string }
+              policy_name: { type: string }
+              start_date: { type: string, format: date }
+              end_date: { type: string, format: date }
+              is_unpaid: { type: boolean }
