@@ -242,8 +242,24 @@ func TestPostgresPayrollSyncAndPreview(t *testing.T) {
 	if err != nil || len(items) != 2 {
 		t.Fatalf("ListSyncItems: got %d, err %v", len(items), err)
 	}
-	if items[0].PresetCode != "OT" || items[1].ExternalID != "x-2" {
-		t.Errorf("sync item fields wrong: %+v", items)
+	// Order-agnostic: the list contract is (created_at, id), and items
+	// created in the same instant tie-break on random UUIDs.
+	byCode := map[string]SyncItem{}
+	for _, it := range items {
+		byCode[it.PresetCode] = it
+	}
+	ot, ok := byCode["OT"]
+	if !ok || ot.AmountMinor != 15000 || string(ot.Kind) != "addition" {
+		t.Errorf("OT sync item wrong: %+v", items)
+	}
+	var late *SyncItem
+	for i := range items {
+		if items[i].ExternalID == "x-2" {
+			late = &items[i]
+		}
+	}
+	if late == nil || late.Label != "Late" || late.AmountMinor != 2000 {
+		t.Errorf("x-2 sync item wrong: %+v", items)
 	}
 	// Atomic: one bad item -> nothing added.
 	bad := []SyncItem{
