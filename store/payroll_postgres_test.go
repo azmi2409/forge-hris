@@ -8,6 +8,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -279,7 +280,16 @@ func TestPostgresPayrollSyncAndPreview(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetPayrollPreview: %v", err)
 	}
-	if string(prev.Payload) != `{"net":630000}` {
+	// Compare semantically: Postgres stores the payload as JSONB, which
+	// normalizes whitespace ({"net":630000} -> {"net": 630000}).
+	var want, got map[string]any
+	if err := json.Unmarshal([]byte(`{"net":630000}`), &want); err != nil {
+		t.Fatalf("unmarshal want: %v", err)
+	}
+	if err := json.Unmarshal(prev.Payload, &got); err != nil {
+		t.Fatalf("unmarshal got: %v (%s)", err, prev.Payload)
+	}
+	if fmt.Sprint(want) != fmt.Sprint(got) {
 		t.Errorf("payload mismatch: %s", prev.Payload)
 	}
 	expired, err := s.SavePayrollPreview(ctx, PayrollPreview{

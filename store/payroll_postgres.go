@@ -465,47 +465,56 @@ func (s *PostgresStore) UpsertPayLine(ctx context.Context, l EmployeePayLine) (E
 		if _, err := employeeTx(ctx, tx, l.OrganizationID, l.EmployeeID); err != nil {
 			return err
 		}
-		var err2 error
-		out, err2 = scanEmployeePayLine(tx.QueryRow(ctx, `
-			UPDATE employee_pay_lines
-			SET gross_minor = $4, additions_minor = $5, deductions_minor = $6,
-			    net_minor = $7, items = $8::jsonb, statutory = $9::jsonb,
-			    bank_account = $10, bank_code = $11, version = version + 1
-			WHERE id = $1::uuid AND organization_id = $2::uuid AND version = $3
-			RETURNING `+payLineCols,
-			l.ID, l.OrganizationID, l.Version,
-			l.GrossMinor, l.AdditionsMinor, l.DeductionsMinor, l.NetMinor,
-			string(itemsJSON), string(statJSON), l.BankAccount, l.BankCode))
-		if errors.Is(err2, pgx.ErrNoRows) {
-			// Insert when there is no line yet for (run, employee);
-			// otherwise the id/version missed -> version conflict.
-			var exists bool
-			if qerr := tx.QueryRow(ctx, `
+		if l.ID != "" {
+			// Version-checked update. Skipped when no ID was given: binding
+			// '' to a uuid parameter is a syntax error, and a new line has
+			// nothing to update anyway.
+			var err2 error
+			out, err2 = scanEmployeePayLine(tx.QueryRow(ctx, `
+				UPDATE employee_pay_lines
+				SET gross_minor = $4, additions_minor = $5, deductions_minor = $6,
+				    net_minor = $7, items = $8::jsonb, statutory = $9::jsonb,
+				    bank_account = $10, bank_code = $11, version = version + 1
+				WHERE id = $1::uuid AND organization_id = $2::uuid AND version = $3
+				RETURNING `+payLineCols,
+				l.ID, l.OrganizationID, l.Version,
+				l.GrossMinor, l.AdditionsMinor, l.DeductionsMinor, l.NetMinor,
+				string(itemsJSON), string(statJSON), l.BankAccount, l.BankCode))
+			if err2 == nil {
+				return nil
+			}
+			if !errors.Is(err2, pgx.ErrNoRows) {
+				return err2
+			}
+		}
+		// Insert when there is no line yet for (run, employee);
+		// otherwise the id/version missed -> version conflict.
+		var exists bool
+		if qerr := tx.QueryRow(ctx, `
 				SELECT EXISTS(SELECT 1 FROM employee_pay_lines
 					WHERE organization_id = $1::uuid AND run_id = $2::uuid AND employee_id = $3::uuid)`,
-				l.OrganizationID, l.RunID, l.EmployeeID).Scan(&exists); qerr != nil {
-				return qerr
-			}
-			if exists {
-				return fmt.Errorf("%w: pay line for employee %s", ErrVersionConflict, l.EmployeeID)
-			}
-			id := l.ID
-			if id == "" {
-				id = newID()
-			}
-			out, err2 = scanEmployeePayLine(tx.QueryRow(ctx, `
+			l.OrganizationID, l.RunID, l.EmployeeID).Scan(&exists); qerr != nil {
+			return qerr
+		}
+		if exists {
+			return fmt.Errorf("%w: pay line for employee %s", ErrVersionConflict, l.EmployeeID)
+		}
+		id := l.ID
+		if id == "" {
+			id = newID()
+		}
+		var err2 error
+		out, err2 = scanEmployeePayLine(tx.QueryRow(ctx, `
 				INSERT INTO employee_pay_lines (id, organization_id, run_id, employee_id,
 					gross_minor, additions_minor, deductions_minor, net_minor,
 					items, statutory, bank_account, bank_code)
 				VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6, $7, $8,
 					$9::jsonb, $10::jsonb, $11, $12)
 				RETURNING `+payLineCols,
-				id, l.OrganizationID, l.RunID, l.EmployeeID,
-				l.GrossMinor, l.AdditionsMinor, l.DeductionsMinor, l.NetMinor,
-				string(itemsJSON), string(statJSON), l.BankAccount, l.BankCode))
-			return mapPgError(err2, "pay line")
-		}
-		return err2
+			id, l.OrganizationID, l.RunID, l.EmployeeID,
+			l.GrossMinor, l.AdditionsMinor, l.DeductionsMinor, l.NetMinor,
+			string(itemsJSON), string(statJSON), l.BankAccount, l.BankCode))
+		return mapPgError(err2, "pay line")
 	})
 	if err != nil {
 		return EmployeePayLine{}, err
