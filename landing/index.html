@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>forge-hris — The open-source HRIS your AI agents can actually operate</title>
+  <meta name="description" content="forge-hris is an MIT-licensed, self-hosted HRIS built for AI agents: time tracking, leave, and Malaysia + Indonesia payroll, with an API-first design — MCP server, webhooks, and audit trails your agents can use on day one.">
+  <meta property="og:title" content="forge-hris — The open-source HRIS your AI agents can actually operate">
+  <meta property="og:description" content="Time tracking, leave, and Malaysia + Indonesia statutory payroll — API-first, with an MCP server, webhooks, and audit trails your agents can use on day one. MIT licensed, self-hosted.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://github.com/azmi2409/forge-hris">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <header class="site-header">
+    <div class="container header-inner">
+      <a class="brand" href="#top">forge-hris</a>
+      <nav class="site-nav" aria-label="Primary">
+        <a href="#time">Time</a>
+        <a href="#leave">Leave</a>
+        <a href="#payroll">Payroll</a>
+        <a href="#agents">Agents</a>
+        <a href="#how-it-works">How it works</a>
+      </nav>
+      <a class="btn btn-ghost" href="https://github.com/azmi2409/forge-hris">GitHub</a>
+    </div>
+  </header>
+
+  <main id="main">
+    <!-- Hero -->
+    <section class="hero" id="top">
+      <div class="container">
+        <p class="eyebrow">Open-source HRIS · MIT license · Self-hosted</p>
+        <h1>The open-source HRIS your AI agents can actually operate.</h1>
+        <p class="lede">Time tracking, leave, and payroll with Malaysia + Indonesia statutory coverage — API-first by design. An MCP server, signed webhooks, and a hash-chained audit trail your agents can use on day one.</p>
+        <div class="cta-row">
+          <a class="btn btn-primary" href="https://github.com/azmi2409/forge-hris">View on GitHub</a>
+          <a class="btn btn-secondary" href="#how-it-works">Quickstart</a>
+        </div>
+        <dl class="hero-facts">
+          <div>
+            <dt>MCP tools</dt>
+            <dd>37 <code>hris.*</code> tools, same calls as REST</dd>
+          </div>
+          <div>
+            <dt>Statutory packs</dt>
+            <dd>MY (EPF/SOCSO/EIS/PCB) + ID (BPJS/PPh 21)</dd>
+          </div>
+          <div>
+            <dt>Setup</dt>
+            <dd><code>docker compose up -d</code></dd>
+          </div>
+        </dl>
+      </div>
+    </section>
+
+    <!-- Time tracking -->
+    <section class="section" id="time">
+      <div class="container">
+        <p class="eyebrow">Time tracking</p>
+        <h2>Attendance, without the surveillance.</h2>
+        <p class="section-intro">Clock in/out with breaks, manual hour entries, and pay-period lifecycles your team can drive from the API — or an agent.</p>
+        <div class="cards">
+          <article class="card">
+            <h3>Clock in/out &amp; breaks</h3>
+            <p>Punches, breaks, and manual hour entries — all idempotent, so a retried request never double-counts time.</p>
+          </article>
+          <article class="card">
+            <h3>Pay-period lifecycle</h3>
+            <p>Open → Submitted → Approved / Rejected → Reopened, with recalculation and a full audit of every transition.</p>
+          </article>
+          <article class="card">
+            <h3>Shift scheduling</h3>
+            <p>First-class shift scheduling — rosters as a core concept, not an afterthought.</p>
+          </article>
+          <article class="card">
+            <h3>Overtime engine</h3>
+            <p>Configurable overtime rules that feed directly into payroll lines.</p>
+          </article>
+        </div>
+        <p class="note">Deliberately absent: face recognition, GPS tracking, and screenshots. Time tracking shouldn’t require surveillance.</p>
+      </div>
+    </section>
+
+    <!-- Leave -->
+    <section class="section section-alt" id="leave">
+      <div class="container">
+        <p class="eyebrow">Leave</p>
+        <h2>Time off with real accrual math.</h2>
+        <p class="section-intro">Policies that accrue, carry forward, and expire — requests with frozen snapshots, ordered approval chains, and a live balance ledger.</p>
+        <div class="cards">
+          <article class="card">
+            <h3>Accrual policies</h3>
+            <p>Annual, monthly, or pay-period accrual with carry-forward rules and expiry — computed, not guessed.</p>
+          </article>
+          <article class="card">
+            <h3>Approval chains</h3>
+            <p>Ordered multi-step approvals with a live balance check, so a request can’t outspend what’s accrued.</p>
+          </article>
+          <article class="card">
+            <h3>Live balances</h3>
+            <p>A balance ledger per employee and policy — every accrual, request, and approval leaves a trace.</p>
+          </article>
+          <article class="card">
+            <h3>Holiday calendars</h3>
+            <p>Public-holiday calendars per country and region, wired into request validation and reporting.</p>
+          </article>
+        </div>
+        <p class="note">Leave is tracked in whole working days — half-day leave isn’t modeled yet.</p>
+      </div>
+    </section>
+
+    <!-- Payroll -->
+    <section class="section" id="payroll">
+      <div class="container">
+        <p class="eyebrow">Payroll</p>
+        <h2>Statutory payroll for Malaysia and Indonesia.</h2>
+        <p class="section-intro">Draft → Approved → Locked runs, payroll-item presets with per-item statutory flags, and versioned rule packs for MY and ID statutory requirements.</p>
+        <div class="cards">
+          <article class="card">
+            <h3>Run lifecycle</h3>
+            <p>Draft → Approved → Locked. Locking a run freezes it against further changes — with full audit history.</p>
+          </article>
+          <article class="card">
+            <h3>Item presets</h3>
+            <p>A catalog of payroll-item presets, each with statutory flags declaring how it interacts with contributions and tax.</p>
+          </article>
+          <article class="card">
+            <h3>MY rule pack</h3>
+            <p>EPF, SOCSO, EIS, PCB, and HRDF calculations derived from worker status and age band.</p>
+          </article>
+          <article class="card">
+            <h3>ID rule pack</h3>
+            <p>BPJS Kesehatan and BPJS Ketenagakerjaan (JHT/JKK/JKM/JP), plus PPh 21 tax calculations.</p>
+          </article>
+          <article class="card">
+            <h3>Payslips &amp; bank files</h3>
+            <p>Payslip generation per employee and bank-file exports (Maybank first) — files for your bank portal, not bank API debits.</p>
+          </article>
+          <article class="card">
+            <h3>Statutory exports</h3>
+            <p>MY: EPF CSV, PCB text files, Borang A. ID: BPJS and PPh 21 report formats.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <!-- Agent-ready -->
+    <section class="section section-alt" id="agents">
+      <div class="container">
+        <p class="eyebrow">Agent-ready</p>
+        <h2>Agents are operators here, not integrations.</h2>
+        <p class="section-intro">The agent surface is generated from the same handlers as the REST API — same store, same auth model, same audit trail. Nothing is bolted on.</p>
+        <div class="cards">
+          <article class="card">
+            <h3>MCP server</h3>
+            <p>37 <code>hris.*</code> tools over stdio or HTTP — time, leave, payroll, and reporting, with the OpenAPI 3.1 contract as the source of truth.</p>
+          </article>
+          <article class="card">
+            <h3>Approval gates</h3>
+            <p>Sensitive tools don’t just run: creates, approvals, and money operations return an approval request with a resume token instead of executing.</p>
+          </article>
+          <article class="card">
+            <h3>Preview → submit</h3>
+            <p>Irreversible operations are two-phase. Payroll submission requires a live preview payload — no blind money movement.</p>
+          </article>
+          <article class="card">
+            <h3>Signed webhooks</h3>
+            <p>HMAC-SHA256 signed, at-least-once event delivery so agents and systems can react to every state change.</p>
+          </article>
+          <article class="card">
+            <h3>SCIM 2.0</h3>
+            <p>Provision and deprovision users and groups from your identity provider with standard SCIM endpoints.</p>
+          </article>
+          <article class="card">
+            <h3>Audit &amp; idempotency</h3>
+            <p>Append-only, hash-chained audit log with agent identity on every entry — and <code>Idempotency-Key</code> on all POSTs.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <!-- How it works -->
+    <section class="section" id="how-it-works">
+      <div class="container">
+        <p class="eyebrow">How it works</p>
+        <h2>Running in three steps.</h2>
+        <div class="steps">
+          <article class="step">
+            <p class="step-number">1</p>
+            <h3>Start everything</h3>
+            <p>One command brings up Postgres 16, the REST API on <code>:8080</code>, and the MCP server on <code>:8081</code>.</p>
+            <pre><code>git clone https://github.com/azmi2409/forge-hris
+cd forge-hris
+docker compose up -d</code></pre>
+          </article>
+          <article class="step">
+            <p class="step-number">2</p>
+            <h3>Create your org &amp; invite the team</h3>
+            <p>Bootstrap the first organization via the API — the owner token is shown once. Then issue personal access tokens and invite your team with role-based access.</p>
+          </article>
+          <article class="step">
+            <p class="step-number">3</p>
+            <h3>Connect your agent via MCP</h3>
+            <p>Point any MCP-capable client at the server over stdio or HTTP. Example — adapt to your client:</p>
+            <pre><code>{
+  "mcpServers": {
+    "forge-hris": {
+      "command": "forge-hris-mcp",
+      "args": ["--stdio"],
+      "env": { "FORGE_HRIS_MCP_TOKEN": "&lt;your-PAT&gt;" }
+    }
+  }
+}</code></pre>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <!-- Good to know -->
+    <section class="section strip" id="good-to-know" aria-label="Good to know">
+      <div class="container">
+        <h2>Good to know</h2>
+        <ul>
+          <li>Statutory rule packs are versioned — but they <strong>must be re-verified against official LHDN, EPF, SOCSO, BPJS, and tax-authority sources</strong> before any real payroll run.</li>
+          <li>This is self-hosted software. You run it, you operate it, and your data stays yours.</li>
+          <li>No face recognition, GPS tracking, or screenshots — by design. Leave is tracked in whole working days.</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- Open source -->
+    <section class="section" id="open-source">
+      <div class="container narrow">
+        <p class="eyebrow">Open source</p>
+        <h2>MIT licensed. Self-hosted. Yours.</h2>
+        <p>forge-hris is open source under the MIT license. No tiers, no seats, no per-employee pricing — the same codebase everyone runs, self-hosted on your own infrastructure, with your data staying yours.</p>
+        <div class="cta-row">
+          <a class="btn btn-primary" href="https://github.com/azmi2409/forge-hris">View on GitHub</a>
+          <a class="btn btn-secondary" href="https://github.com/azmi2409/forge-hris/blob/main/docs/openapi.yaml">Read the API contract</a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container footer-inner">
+      <p>forge-hris · MIT License · <a href="https://github.com/azmi2409/forge-hris">GitHub</a></p>
+      <p>Built for teams operated by AI agents.</p>
+    </div>
+  </footer>
+</body>
+</html>

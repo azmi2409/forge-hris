@@ -68,6 +68,12 @@ const (
 	// submitted (REST submit and hris.submit_payroll fan one event per
 	// payslip).
 	WebhookEventPayslipIssued = "payslip.issued"
+	// WebhookEventXeroBillPosted is emitted when a payroll run's bill posts
+	// to Xero (component 6): once per employee bill, manual or auto-post.
+	WebhookEventXeroBillPosted = "xero.bill_posted"
+	// WebhookEventXeroBillFailed is emitted when posting a payroll run's
+	// bill to Xero fails (the payroll approval itself still succeeds).
+	WebhookEventXeroBillFailed = "xero.bill_failed"
 	// WebhookEventWildcard matches every event type in a subscription.
 	WebhookEventWildcard = "*"
 )
@@ -93,6 +99,8 @@ var webhookEventTypes = map[string]bool{
 	WebhookEventPayrollSubmitted:    true,
 	WebhookEventPayrollCancelled:    true,
 	WebhookEventPayslipIssued:       true,
+	WebhookEventXeroBillPosted:      true,
+	WebhookEventXeroBillFailed:      true,
 	WebhookEventWildcard:            true,
 }
 

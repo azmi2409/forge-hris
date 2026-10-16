@@ -70,13 +70,16 @@ const (
 	TimeEntryClientDesktop     = "desktop"
 	TimeEntryClientKiosk       = "kiosk"
 	TimeEntryClientAIAssistant = "ai_assistant"
+	TimeEntryClientSlack       = "slack"
+	TimeEntryClientTeams       = "teams"
 )
 
 // ValidTimeEntryClient reports whether c is a known client type.
 func ValidTimeEntryClient(c string) bool {
 	switch c {
 	case TimeEntryClientWeb, TimeEntryClientMobile, TimeEntryClientDesktop,
-		TimeEntryClientKiosk, TimeEntryClientAIAssistant:
+		TimeEntryClientKiosk, TimeEntryClientAIAssistant,
+		TimeEntryClientSlack, TimeEntryClientTeams:
 		return true
 	}
 	return false

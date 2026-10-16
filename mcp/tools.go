@@ -406,7 +406,7 @@ func newRegistry(s *Server) *Registry {
 				"latitude":    numProp("GPS latitude."),
 				"longitude":   numProp("GPS longitude."),
 				"address":     strProp("Address label."),
-				"client_type": strProp("Client type: web, mobile, desktop, kiosk, ai_assistant."),
+				"client_type": strProp("Client type: web, mobile, desktop, kiosk, ai_assistant, slack, teams."),
 			}, "entry_id", "kind"),
 			OutputSchema: objSchema(map[string]any{
 				"time_entry": map[string]any{"type": "object", "description": "The superseding head entry."},
@@ -646,7 +646,7 @@ func clockProps() map[string]any {
 		"latitude":        numProp("GPS latitude."),
 		"longitude":       numProp("GPS longitude."),
 		"address":         strProp("Address label."),
-		"client_type":     strProp("Client type: web, mobile, desktop, kiosk, ai_assistant."),
+		"client_type":     strProp("Client type: web, mobile, desktop, kiosk, ai_assistant, slack, teams."),
 		"idempotency_key": strProp("Optional idempotency key: a retry with the same key and identical arguments replays the first result instead of punching twice."),
 	}
 }

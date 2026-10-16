@@ -690,6 +690,10 @@ func (s *Server) submitPayrollRun(w http.ResponseWriter, r *http.Request, ai *Au
 	if !mapError(w, r, err) {
 		return zero, false
 	}
+	// Auto-post the run's bills to Xero when the org connected Xero and
+	// enabled auto_post. Best-effort: Xero failures are logged and
+	// recorded in the posting ledger; the approval itself never fails.
+	s.autoPostXeroBill(ctx, orgID, approved.ID)
 	var lines []store.EmployeePayLine
 	cursor := ""
 	for {

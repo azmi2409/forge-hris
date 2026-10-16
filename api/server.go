@@ -24,7 +24,9 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/azmi2409/forge-hris/integrations/xero"
 	"github.com/azmi2409/forge-hris/store"
+	"github.com/azmi2409/forge-hris/web/ess"
 )
 
 // maxBodyBytes caps request bodies so one caller can't force large allocs.
@@ -46,7 +48,14 @@ type Server struct {
 	mux     *http.ServeMux
 	limiter *rateLimiter
 	idemMu  *keyedMutex
+	// xero is the optional Xero integration handler (component 6). Nil
+	// disables the integration; the xero routes answer 501 then.
+	xero *xero.Handler
 }
+
+// SetXeroIntegration wires the Xero integration handler into the API.
+// Call before Serve; a nil handler disables the integration.
+func (s *Server) SetXeroIntegration(h *xero.Handler) { s.xero = h }
 
 // NewServer builds the API server. Pass nil logger for a discard logger.
 func NewServer(st store.Store, logger *slog.Logger) *Server {
@@ -139,6 +148,27 @@ func (s *Server) routes() {
 	s.payrollRoutes()
 	s.webhookRoutes()
 	s.scimRoutes()
+
+	// Component 6 (integrations) route groups — contract wiring, Worker D
+	// 2026-10-16. The route contracts are fixed (see docs/integrations.md);
+	// the handler packages are owned by sibling workers and are not in the
+	// tree yet. Do NOT stub these methods — Worker A owns api/xero.go
+	// (func (s *Server) xeroRoutes()) and Worker B owns api/chat.go
+	// (func (s *Server) chatRoutes()). The build stays red on these two
+	// calls until the sibling files land; no further server.go edit is
+	// needed once they do.
+	s.xeroRoutes()
+	s.chatRoutes()
+
+	// ESS portal (component 6, Worker B): server-rendered employee
+	// self-service under /ess/. The store.Store interface doesn't include
+	// the ESS facet; only the concrete adapters satisfy ess.EssStore,
+	// hence the type assertion (same pattern as the Xero integration).
+	if es, ok := s.store.(ess.EssStore); ok {
+		m.Handle("/ess/", http.StripPrefix("/ess", ess.NewHandler(es)))
+	} else {
+		s.logger.Warn("ess portal disabled: store does not implement ess.EssStore")
+	}
 }
 
 // --- middleware ---

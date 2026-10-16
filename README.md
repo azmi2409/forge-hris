@@ -12,8 +12,11 @@ Full reverse-engineering analysis: [`docs/rea-hris.md`](docs/rea-hris.md).
 ## Status
 
 Components 1–5 done (core platform, time tracking, leave, agent surface,
-payroll engine); component 6 (integrations) remains. Build progress in
-[`TODO.md`](TODO.md).
+payroll engine); component 6 (integrations) delivery landed 2026-10-16 —
+route + endpoint contracts wired (`api/server.go`, `docs/openapi.yaml`
+v1.4.0, [`docs/integrations.md`](docs/integrations.md)) — with the handler
+packages (`api/xero.go`, `api/chat.go`, `integrations/*`, `web/ess`) still
+landing from parallel workers. Build progress in [`TODO.md`](TODO.md).
 
 ## Build plan (summary)
 
@@ -172,6 +175,41 @@ Webhooks: `POST /api/v1/organizations/$ORG/webhooks` (admin) with
 deliveries are HMAC-SHA256 signed (`X-Hub-Signature-256`), at-least-once.
 SCIM 2.0 for Okta/Entra: provision a service-account credential, then point
 the IdP at `/scim/v2` (see `docs/openapi.yaml`).
+
+## Integrations (component 6)
+
+Setup guide: [`docs/integrations.md`](docs/integrations.md). Contracts:
+`docs/openapi.yaml` v1.4.0. Note: no sandbox testing was done for
+Xero/Slack/Teams here — real developer credentials are needed to verify
+end-to-end.
+
+- **Xero bill-on-approval** — admin starts OAuth2 via
+  `POST .../integrations/xero/connect`, Xero redirects to
+  `/api/v1/integrations/xero/callback` (`400 INVALID_STATE` on mismatch);
+  `POST .../integrations/xero/mappings` stores payroll-component →
+  account-code and employee → contact mappings plus the auto-post flag.
+  `POST .../payroll-runs/{id}/xero-bill` with `{"dry_run": true}` previews
+  the ACCPAY bill JSON without touching Xero; `dry_run: false` posts it and
+  records the `xero_invoice_id` on the run (idempotent via
+  `Idempotency-Key`).
+- **Slack/Teams clock-in** — Slack: register the workspace
+  (`POST .../integrations/slack` with `team_id`, `signing_secret`,
+  `service_token`), link users (`POST .../integrations/slack/users`), then
+  `/clockin` / `/clockout` slash commands hit the signed
+  `/api/v1/integrations/slack/events` receiver. Teams: register the tenant
+  and shared secret (`POST .../integrations/teams`), link users, and point
+  the app manifest `webhookUrl` at
+  `/api/v1/integrations/teams/webhook?key=<secret>`. Secrets are encrypted
+  at rest (`FORGE_HRIS_SECRET_KEY`, AES-256-GCM) and never returned again.
+- **ESS portal** — employee self-service at `/ess/`: magic-link login
+  (no passwords; pluggable mailer, logs the link by default), home,
+  timesheets, leave, and payslips as server-rendered HTML over the same
+  store and RBAC as the REST API.
+
+## Landing page
+
+Static marketing site in [`landing/`](landing/) — subtle/professional,
+English, no pricing. Deploy anywhere (any static host or CDN).
 
 ## License
 

@@ -159,7 +159,21 @@ func requireScope(scope string, ai *AuthInfo) bool {
 func (s *Server) withAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/healthz" ||
-			(r.Method == http.MethodPost && r.URL.Path == "/api/v1/organizations") {
+			(r.Method == http.MethodPost && r.URL.Path == "/api/v1/organizations") ||
+			// Component 6 public webhooks: authentication is the Slack
+			// request signature / Teams shared secret, verified inside the
+			// handlers — there is no forge-hris bearer token on these.
+			(r.Method == http.MethodPost && (r.URL.Path == "/api/v1/integrations/slack/events" ||
+				r.URL.Path == "/api/v1/integrations/teams/webhook")) ||
+			// Xero OAuth callback: Xero redirects the operator's browser
+			// here; the state token (validated inside the handler) binds
+			// the callback to the org that started the flow.
+			(r.Method == http.MethodGet && r.URL.Path == "/api/v1/integrations/xero/callback") ||
+			// ESS portal: browser-facing employee self-service under /ess/
+			// with its own magic-link + session-cookie auth, enforced
+			// inside the web/ess handlers — there is no forge-hris bearer
+			// token on these requests.
+			strings.HasPrefix(r.URL.Path, "/ess/") || r.URL.Path == "/ess" {
 			next.ServeHTTP(w, r)
 			return
 		}

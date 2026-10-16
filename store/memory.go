@@ -50,6 +50,18 @@ type MemoryStore struct {
 	payPresetCodes   map[string]string            // orgID + "\x00" + code -> preset id
 	paySyncItems     map[string]SyncItem          // orgID + "\x00" + id
 	payPreviews      map[string]PayrollPreview    // orgID + "\x00" + id
+	// --- chat integrations + ESS (component 6) ---
+	slackWorkspaces map[string]SlackWorkspace // team_id
+	slackUserMap    map[string]string         // team_id + "\x00" + slack_user_id -> employee ID
+	teamsConfigs    map[string]TeamsConfig    // orgID
+	teamsUserMap    map[string]string         // orgID + "\x00" + teams_user_id -> employee ID
+	essTokens       map[string]ESSToken       // token_hash
+	// --- xero integration (component 6; Worker A) ---
+	xeroConns     map[string]XeroConnection     // orgID
+	xeroAcctMaps  map[string]XeroAccountMapping // orgID + "\x00" + component_key
+	xeroContMaps  map[string]XeroContactMapping // orgID + "\x00" + employeeID
+	xeroPostings  map[string]XeroBillPosting    // posting id
+	xeroPostIndex map[string]string             // orgID + "\x00" + runID + "\x00" + employeeID -> posting id
 }
 
 // NewMemoryStore returns an empty MemoryStore.
@@ -84,6 +96,18 @@ func NewMemoryStore() *MemoryStore {
 		payPresetCodes:   make(map[string]string),
 		paySyncItems:     make(map[string]SyncItem),
 		payPreviews:      make(map[string]PayrollPreview),
+		// --- chat integrations + ESS (component 6) ---
+		slackWorkspaces: make(map[string]SlackWorkspace),
+		slackUserMap:    make(map[string]string),
+		teamsConfigs:    make(map[string]TeamsConfig),
+		teamsUserMap:    make(map[string]string),
+		essTokens:       make(map[string]ESSToken),
+		// --- xero integration (component 6; Worker A) ---
+		xeroConns:     make(map[string]XeroConnection),
+		xeroAcctMaps:  make(map[string]XeroAccountMapping),
+		xeroContMaps:  make(map[string]XeroContactMapping),
+		xeroPostings:  make(map[string]XeroBillPosting),
+		xeroPostIndex: make(map[string]string),
 	}
 }
 

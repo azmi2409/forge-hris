@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
-  title: forge-hris API — components 1–5 (identity, tenancy, audit, time tracking, leave, agent surface, payroll)
-  version: 1.3.0
+  title: forge-hris API — components 1–6 (identity, tenancy, audit, time tracking, leave, agent surface, payroll, integrations)
+  version: 1.4.0
   description: |
     Core platform API for forge-hris: organizations, groups, employees, RBAC
     roles, credentials (PATs + service accounts), and the hash-chained audit log.
@@ -19,6 +19,15 @@ info:
     overrides), sync items, unpaid-leave auto-deduction, payslips (JSON/HTML),
     bank files (pipe-delimited, Maybank template), and MY statutory exports
     (EPF CSV, PCB txt, Borang A). All money is int64 minor units.
+
+    Component 6 adds integrations: Xero bill-on-approval (OAuth2 connect,
+    account/contact mappings, dry-run bill preview), Slack and Teams chat
+    surfaces (signed inbound webhooks, workspace registration, user linking
+    for `/clockin`/`/clockout`), and the ESS self-service portal —
+    server-rendered HTML under `/ess/` (magic-link login; timesheets, leave,
+    payslips), documented in `docs/integrations.md` rather than as machine
+    paths. Integration secrets at rest are encrypted with the
+    `FORGE_HRIS_SECRET_KEY` envelope (AES-256-GCM).
 
     ## Authentication
 
@@ -3663,6 +3672,377 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/SystemPresetImmutable' }
 
+  # --- Component 6: integrations -----------------------------------------
+  # Route contracts for the Xero, Slack, and Teams integrations (Worker D,
+  # 2026-10-16). Handler packages (api/xero.go, api/chat.go) are owned by
+  # sibling workers; the contracts below are fixed. ESS (/ess/) is
+  # server-rendered HTML, not a JSON API — see docs/integrations.md.
+
+  /api/v1/organizations/{orgId}/integrations/xero/connect:
+    post:
+      summary: Start Xero OAuth2 connect
+      description: |
+        Admin only. Begins the Xero OAuth2 flow: generates a one-time
+        `state` token, then the caller redirects the admin's browser to
+        `authorization_url`. Xero redirects back to
+        `GET /api/v1/integrations/xero/callback` with `code` and `state`.
+        Requires `XERO_CLIENT_ID`/`XERO_CLIENT_SECRET`/`XERO_REDIRECT_URL`
+        to be configured on the server.
+      operationId: xeroConnect
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+      responses:
+        '200':
+          description: Authorization URL and state token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/XeroConnectResponse'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/integrations/xero/callback:
+    get:
+      summary: Xero OAuth2 callback
+      description: |
+        Xero redirects the admin's browser here after authorization. The
+        `state` is verified against the pending connect request; a mismatch
+        returns `400 INVALID_STATE`. On success the access/refresh tokens are
+        exchanged and stored encrypted (FORGE_HRIS_SECRET_KEY envelope).
+        No forge-hris authentication — the `state` token is the credential.
+      security: []
+      operationId: xeroCallback
+      parameters:
+        - name: code
+          in: query
+          required: true
+          schema: { type: string }
+        - name: state
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Xero connected
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/XeroCallbackResponse'
+        '400': { $ref: '#/components/responses/InvalidState' }
+
+  /api/v1/organizations/{orgId}/integrations/xero/status:
+    get:
+      summary: Xero connection status
+      description: |
+        Whether Xero is connected for the organization, the connected Xero
+        tenant ID, and whether approved payroll runs auto-post as Xero bills.
+      operationId: xeroStatus
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+      responses:
+        '200':
+          description: Connection status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/XeroStatusResponse'
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/organizations/{orgId}/integrations/xero/mappings:
+    post:
+      summary: Set Xero mappings
+      description: |
+        Admin only. Stores the payroll-component -> Xero account mappings
+        (`component_key` is a payroll item preset code; `account_code` is the
+        Xero chart-of-accounts code) and employee -> Xero contact mappings,
+        plus the `auto_post` flag that makes approving a payroll run post a
+        bill to Xero automatically.
+      operationId: xeroSetMappings
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/XeroMappingsRequest'
+      responses:
+        '200':
+          description: Mappings stored
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/XeroStatusResponse'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/organizations/{orgId}/integrations/xero:
+    delete:
+      summary: Disconnect Xero
+      description: |
+        Admin only. Revokes the stored Xero tokens and clears the tenant,
+        mappings, and auto-post flag. Posted bills are left untouched in
+        Xero.
+      operationId: xeroDisconnect
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+      responses:
+        '204':
+          description: Disconnected
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/organizations/{orgId}/payroll-runs/{runId}/xero-bill:
+    post:
+      summary: Post a payroll run as Xero bills
+      description: |
+        Admin only. Posts **one Xero ACCPAY bill per employee** of an approved
+        payroll run (each employee maps to one Xero contact via the stored
+        contact mappings; line items map to Xero accounts via the account
+        mappings). Only approved runs can post — anything else is rejected
+        with 409 XERO_RUN_NOT_APPROVED so a draft's tentative numbers can
+        never reach Xero. With `dry_run: true` the would-be bills are
+        returned without touching Xero (safe to call any time). Posting is
+        recorded per (run, employee) in the bill-postings ledger, which is
+        the source of truth for retries. Idempotent via `Idempotency-Key`.
+      operationId: xeroPostBill
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: runId
+          in: path
+          required: true
+          schema: { type: string }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/XeroBillRequest'
+      responses:
+        '200':
+          description: Dry-run bill preview (one bill object per employee)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/XeroBillResponse'
+        '201':
+          description: Bills posted; per-bill ledger rows in `postings`
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  postings:
+                    type: array
+                    items: { $ref: '#/components/schemas/XeroBillPosting' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Run not found, or Xero not connected (XERO_NOT_CONNECTED)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: XERO_RUN_NOT_APPROVED (run is not approved) or idempotency-key reuse
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '502':
+          description: XERO_API_ERROR — all bill posts failed; failed ledger rows in `postings`
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  code: { type: string }
+                  message: { type: string }
+                  postings:
+                    type: array
+                    items: { $ref: '#/components/schemas/XeroBillPosting' }
+
+  /api/v1/integrations/slack/events:
+    post:
+      summary: Slack Events API receiver
+      description: |
+        Receives Slack Events API callbacks and slash-command invocations
+        (`/clockin`, `/clockout`). No forge-hris authentication — requests
+        are verified with the workspace's Slack signing secret
+        (`X-Slack-Signature` / `X-Slack-Request-Timestamp`). URL
+        verification challenges (`type: url_verification`) are echoed back
+        with the challenge token.
+      security: []
+      operationId: slackEvents
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Raw Slack event payload.
+      responses:
+        '200':
+          description: Acknowledged (or challenge echoed for url_verification)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SlackEventAck'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /api/v1/organizations/{orgId}/integrations/slack:
+    post:
+      summary: Register a Slack workspace
+      description: |
+        Admin only. Registers a Slack workspace for the organization: stores
+        the team identity plus the signing secret (for inbound verification)
+        and the service token (for outbound API calls), both encrypted with
+        the FORGE_HRIS_SECRET_KEY envelope. The plaintext secrets are never
+        returned again.
+      operationId: slackRegister
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SlackIntegrationRequest'
+      responses:
+        '200':
+          description: Workspace registered (secrets never returned)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SlackIntegration'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/organizations/{orgId}/integrations/slack/users:
+    post:
+      summary: Link a Slack user to an employee
+      description: |
+        Admin only. Links a Slack user ID to an employee so slash commands
+        and events resolve to the right employee for clock in/out.
+      operationId: slackLinkUser
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SlackUserLinkRequest'
+      responses:
+        '200':
+          description: User linked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SlackUserLinkRequest'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/integrations/teams/webhook:
+    post:
+      summary: Teams incoming-webhook receiver
+      description: |
+        Receives Teams workflow/bot callbacks (adaptive-card actions for
+        clock in/out). No forge-hris authentication — the `key` query
+        parameter must equal the organization's registered shared secret.
+        Configure the Teams app manifest `webhookUrl` to this URL with the
+        secret appended.
+      security: []
+      operationId: teamsWebhook
+      parameters:
+        - name: key
+          in: query
+          required: true
+          description: The organization's Teams shared secret.
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Raw Teams webhook payload.
+      responses:
+        '200':
+          description: Acknowledged
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, example: true }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /api/v1/organizations/{orgId}/integrations/teams:
+    post:
+      summary: Register a Teams tenant
+      description: |
+        Admin only. Registers a Teams tenant for the organization and stores
+        its shared secret (used as the `key` query parameter on the inbound
+        webhook), encrypted with the FORGE_HRIS_SECRET_KEY envelope. The
+        plaintext secret is never returned again.
+      operationId: teamsRegister
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TeamsIntegrationRequest'
+      responses:
+        '200':
+          description: Tenant registered (secret never returned)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TeamsIntegration'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/organizations/{orgId}/integrations/teams/users:
+    post:
+      summary: Link a Teams user to an employee
+      description: |
+        Admin only. Links a Teams user ID to an employee so webhook actions
+        resolve to the right employee for clock in/out.
+      operationId: teamsLinkUser
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TeamsUserLinkRequest'
+      responses:
+        '200':
+          description: User linked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TeamsUserLinkRequest'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
 components:
   securitySchemes:
     bearerAuth:
@@ -3828,6 +4208,19 @@ components:
               value:
                 code: VALIDATION_ERROR
                 message: 'version: required and must be positive'
+                request_id: abc123
+
+    InvalidState:
+      description: OAuth state mismatch (Xero callback).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            invalidState:
+              value:
+                code: INVALID_STATE
+                message: 'xero: oauth state mismatch'
                 request_id: abc123
 
     InsufficientBalance:
@@ -4426,7 +4819,7 @@ components:
 
     TimeEntryClientType:
       type: string
-      enum: [web, mobile, desktop, kiosk, ai_assistant]
+      enum: [web, mobile, desktop, kiosk, ai_assistant, slack, teams]
 
     TimeEntry:
       type: object
@@ -5437,3 +5830,161 @@ components:
         kind: { type: string, enum: [addition, deduction] }
         preset_code: { type: string }
         amount_minor: { type: integer }
+
+    # --- Component 6: integrations -----------------------------------------
+    XeroConnectResponse:
+      type: object
+      required: [authorization_url, state]
+      properties:
+        authorization_url:
+          type: string
+          description: Xero OAuth2 authorization URL; redirect the admin's browser here.
+        state:
+          type: string
+          description: One-time state token; returned by Xero on the callback.
+
+    XeroCallbackResponse:
+      type: object
+      required: [connected, tenant_id]
+      properties:
+        connected: { type: boolean, example: true }
+        tenant_id:
+          type: string
+          description: The Xero tenant (organisation) the tokens belong to.
+
+    XeroStatusResponse:
+      type: object
+      required: [connected, tenant_id, auto_post]
+      properties:
+        connected: { type: boolean }
+        tenant_id: { type: string }
+        auto_post:
+          type: boolean
+          description: Whether approving a payroll run auto-posts a Xero bill.
+
+    XeroAccountMapping:
+      type: object
+      required: [component_key, account_code]
+      properties:
+        component_key:
+          type: string
+          description: Payroll item preset code (e.g. sys:basic_salary).
+        account_code:
+          type: string
+          description: Xero chart-of-accounts code.
+
+    XeroContactMapping:
+      type: object
+      required: [employee_id, contact_id]
+      properties:
+        employee_id: { type: string }
+        contact_id:
+          type: string
+          description: Xero contact ID for the employee.
+
+    XeroMappingsRequest:
+      type: object
+      properties:
+        auto_post: { type: boolean }
+        account_mappings:
+          type: array
+          items: { $ref: '#/components/schemas/XeroAccountMapping' }
+        contact_mappings:
+          type: array
+          items: { $ref: '#/components/schemas/XeroContactMapping' }
+
+    XeroBillRequest:
+      type: object
+      required: [dry_run]
+      properties:
+        dry_run:
+          type: boolean
+          description: true = return the bill JSON without touching Xero.
+
+    XeroBillResponse:
+      type: object
+      required: [dry_run]
+      description: Dry-run response — one would-be bill object per employee.
+      properties:
+        dry_run: { type: boolean }
+        bills:
+          type: array
+          description: The Xero ACCPAY bill payloads that would be posted (present when dry_run is true).
+          items: { type: object }
+
+    XeroBillPosting:
+      type: object
+      description: One row of the bill-postings ledger — one employee's bill for one payroll run.
+      properties:
+        id: { type: string }
+        organization_id: { type: string }
+        run_id: { type: string }
+        employee_id: { type: string }
+        status: { type: string, enum: [pending, posted, failed] }
+        xero_invoice_id: { type: string }
+        xero_invoice_number: { type: string }
+        error: { type: string }
+        created_at: { type: string, format: date-time }
+
+    SlackIntegrationRequest:
+      type: object
+      required: [team_id, signing_secret, service_token]
+      properties:
+        team_id: { type: string }
+        team_name: { type: string }
+        signing_secret:
+          type: string
+          description: Slack app signing secret (verifies inbound requests). Stored encrypted, never returned.
+        service_token:
+          type: string
+          description: Slack bot token (xoxb-...) for outbound API calls. Stored encrypted, never returned.
+
+    SlackIntegration:
+      type: object
+      required: [team_id]
+      properties:
+        team_id: { type: string }
+        team_name: { type: string }
+
+    SlackUserLinkRequest:
+      type: object
+      required: [team_id, slack_user_id, employee_id]
+      description: |
+        team_id is required because one organization can connect multiple
+        Slack workspaces; the link target is ambiguous without it.
+      properties:
+        team_id: { type: string }
+        slack_user_id: { type: string }
+        employee_id: { type: string }
+
+    SlackEventAck:
+      type: object
+      description: |
+        Slack Events API acknowledgement. For `url_verification` events the
+        `challenge` field echoes the incoming challenge token.
+      properties:
+        challenge: { type: string }
+
+    TeamsIntegrationRequest:
+      type: object
+      required: [tenant_ref, shared_secret]
+      properties:
+        tenant_ref:
+          type: string
+          description: Teams tenant identifier.
+        shared_secret:
+          type: string
+          description: Shared secret appended as ?key= on the inbound webhook. Stored encrypted, never returned.
+
+    TeamsIntegration:
+      type: object
+      required: [tenant_ref]
+      properties:
+        tenant_ref: { type: string }
+
+    TeamsUserLinkRequest:
+      type: object
+      required: [teams_user_id, employee_id]
+      properties:
+        teams_user_id: { type: string }
+        employee_id: { type: string }
