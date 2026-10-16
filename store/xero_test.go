@@ -21,6 +21,37 @@ func mustXeroOrg(t *testing.T, s *MemoryStore) string {
 	return org.ID
 }
 
+// mustXeroEmployee creates a real employee: contact mappings and bill
+// postings reference employees by FK, so tests must use real IDs.
+func mustXeroEmployee(t *testing.T, s *MemoryStore, orgID, number string) Employee {
+	t.Helper()
+	emp, err := s.CreateEmployee(context.Background(), Employee{
+		OrganizationID: orgID,
+		EmployeeNumber: number,
+		FirstName:      "Xero",
+		LastName:       "Test",
+		Email:          number + "@example.test",
+		Status:         InvitationJoined,
+	})
+	if err != nil {
+		t.Fatalf("CreateEmployee: %v", err)
+	}
+	return emp
+}
+
+func mustXeroRun(t *testing.T, s *MemoryStore, orgID, period string) PayrollRun {
+	t.Helper()
+	run, err := s.CreatePayrollRun(context.Background(), PayrollRun{
+		OrganizationID: orgID,
+		Period:         period,
+		CountryCode:    "MY",
+	})
+	if err != nil {
+		t.Fatalf("CreatePayrollRun: %v", err)
+	}
+	return run
+}
+
 func TestMemoryXeroConnectionCRUD(t *testing.T) {
 	s := NewMemoryStore()
 	ctx := context.Background()
@@ -105,10 +136,16 @@ func TestMemoryXeroMappings(t *testing.T) {
 		t.Fatalf("empty mappings: %v %v %v", accts, conts, err)
 	}
 
+	emp := mustXeroEmployee(t, s, orgID, "X-001")
 	if err := s.SaveXeroMappings(ctx, orgID,
 		[]XeroAccountMapping{{ComponentKey: "payroll.net_pay", AccountCode: "476"}},
-		[]XeroContactMapping{{EmployeeID: "emp-1", ContactID: "contact-1"}}); err != nil {
+		[]XeroContactMapping{{EmployeeID: emp.ID, ContactID: "contact-1"}}); err != nil {
 		t.Fatalf("Save: %v", err)
+	}
+	// A contact mapping for a ghost employee is rejected.
+	if err := s.SaveXeroMappings(ctx, orgID, nil,
+		[]XeroContactMapping{{EmployeeID: newID(), ContactID: "ghost"}}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("ghost employee mapping: want ErrNotFound, got %v", err)
 	}
 	accts, conts, err = s.GetXeroMappings(ctx, orgID)
 	if err != nil {
@@ -157,7 +194,23 @@ func TestMemoryXeroBillPostings(t *testing.T) {
 	s := NewMemoryStore()
 	ctx := context.Background()
 	orgID := mustXeroOrg(t, s)
-	runID, empID := newID(), newID()
+	emp := mustXeroEmployee(t, s, orgID, "X-002")
+	run := mustXeroRun(t, s, orgID, "2026-10")
+	runID, empID := run.ID, emp.ID
+
+	// Ghost run / employee are rejected: the ledger holds no orphans.
+	if _, err := s.RecordBillPosting(ctx, XeroBillPosting{
+		OrganizationID: orgID, RunID: newID(), EmployeeID: empID,
+		Status: XeroBillPostingFailed, Error: "x",
+	}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("ghost run: want ErrNotFound, got %v", err)
+	}
+	if _, err := s.RecordBillPosting(ctx, XeroBillPosting{
+		OrganizationID: orgID, RunID: runID, EmployeeID: newID(),
+		Status: XeroBillPostingFailed, Error: "x",
+	}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("ghost employee: want ErrNotFound, got %v", err)
+	}
 
 	if rows, err := s.ListBillPostings(ctx, orgID, runID); err != nil || len(rows) != 0 {
 		t.Fatalf("empty: %v %v", rows, err)
@@ -200,8 +253,9 @@ func TestMemoryXeroBillPostings(t *testing.T) {
 	}
 
 	// Postings for another run are listed separately.
+	otherRun := mustXeroRun(t, s, orgID, "2026-11")
 	other, err := s.RecordBillPosting(ctx, XeroBillPosting{
-		OrganizationID: orgID, RunID: newID(), EmployeeID: empID, Status: XeroBillPostingFailed, Error: "down",
+		OrganizationID: orgID, RunID: otherRun.ID, EmployeeID: empID, Status: XeroBillPostingFailed, Error: "down",
 	})
 	if err != nil {
 		t.Fatalf("Record other: %v", err)

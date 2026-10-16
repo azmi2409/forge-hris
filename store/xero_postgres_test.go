@@ -22,6 +22,35 @@ func mustPgXeroOrg(t *testing.T, s *PostgresStore) string {
 	return org.ID
 }
 
+func mustPgXeroEmployee(t *testing.T, s *PostgresStore, orgID, number string) Employee {
+	t.Helper()
+	emp, err := s.CreateEmployee(t.Context(), Employee{
+		OrganizationID: orgID,
+		EmployeeNumber: number,
+		FirstName:      "Xero",
+		LastName:       "Test",
+		Email:          number + "@example.test",
+		Status:         InvitationJoined,
+	})
+	if err != nil {
+		t.Fatalf("CreateEmployee: %v", err)
+	}
+	return emp
+}
+
+func mustPgXeroRun(t *testing.T, s *PostgresStore, orgID, period string) PayrollRun {
+	t.Helper()
+	run, err := s.CreatePayrollRun(t.Context(), PayrollRun{
+		OrganizationID: orgID,
+		Period:         period,
+		CountryCode:    "MY",
+	})
+	if err != nil {
+		t.Fatalf("CreatePayrollRun: %v", err)
+	}
+	return run
+}
+
 func TestPostgresXeroConnectionCRUD(t *testing.T) {
 	s, ctx := testPostgresHRIS(t)
 	orgID := mustPgXeroOrg(t, s)
@@ -95,12 +124,13 @@ func TestPostgresXeroMappings(t *testing.T) {
 	s, ctx := testPostgresHRIS(t)
 	orgID := mustPgXeroOrg(t, s)
 
+	emp := mustPgXeroEmployee(t, s, orgID, "PX-001")
 	if err := s.SaveXeroMappings(ctx, orgID,
 		[]XeroAccountMapping{
 			{ComponentKey: "payroll.net_pay", AccountCode: "476"},
 			{ComponentKey: "bonus", AccountCode: "477"},
 		},
-		[]XeroContactMapping{{EmployeeID: newID(), ContactID: "c-1"}}); err != nil {
+		[]XeroContactMapping{{EmployeeID: emp.ID, ContactID: "c-1"}}); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 	accts, conts, err := s.GetXeroMappings(ctx, orgID)
@@ -131,7 +161,9 @@ func TestPostgresXeroMappings(t *testing.T) {
 func TestPostgresXeroBillPostings(t *testing.T) {
 	s, ctx := testPostgresHRIS(t)
 	orgID := mustPgXeroOrg(t, s)
-	runID, empID := newID(), newID()
+	emp := mustPgXeroEmployee(t, s, orgID, "PX-002")
+	run := mustPgXeroRun(t, s, orgID, "2026-10")
+	runID, empID := run.ID, emp.ID
 
 	p, err := s.RecordBillPosting(ctx, XeroBillPosting{
 		OrganizationID:    orgID,

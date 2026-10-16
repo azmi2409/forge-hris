@@ -299,10 +299,20 @@ func TestHandleMappings(t *testing.T) {
 	st := store.NewMemoryStore()
 	orgID := testOrg(t, st)
 	h := newTestHandler(st, &FakeClient{})
+	emp, err := st.CreateEmployee(context.Background(), store.Employee{
+		OrganizationID: orgID,
+		EmployeeNumber: "XH-001",
+		FirstName:      "Xero",
+		Email:          "xh-001@example.test",
+		Status:         store.InvitationJoined,
+	})
+	if err != nil {
+		t.Fatalf("CreateEmployee: %v", err)
+	}
 
 	body := `{"auto_post": true,
 		"account_mappings": [{"component_key": "payroll.net_pay", "account_code": "476"}],
-		"contact_mappings": [{"employee_id": "emp-1", "contact_id": "contact-1"}]}`
+		"contact_mappings": [{"employee_id": "` + emp.ID + `", "contact_id": "contact-1"}]}`
 
 	// Mappings require a connection first.
 	req := httptest.NewRequest(http.MethodPost, "/mappings", strings.NewReader(body))

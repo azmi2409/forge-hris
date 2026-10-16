@@ -114,6 +114,12 @@ func (s *MemoryStore) SaveXeroMappings(ctx context.Context, orgID string, accoun
 	if _, ok := s.orgs[orgID]; !ok {
 		return fmt.Errorf("%w: organization %s", ErrNotFound, orgID)
 	}
+	// Contact mappings reference real employees (mirrors the Postgres FK).
+	for _, c := range contacts {
+		if _, ok := s.employees[gkey(orgID, c.EmployeeID)]; !ok {
+			return fmt.Errorf("%w: employee %s", ErrNotFound, c.EmployeeID)
+		}
+	}
 	// Replace both sets atomically under the one lock.
 	for k, m := range s.xeroAcctMaps {
 		if m.OrganizationID == orgID {
@@ -174,6 +180,13 @@ func (s *MemoryStore) RecordBillPosting(ctx context.Context, p XeroBillPosting) 
 	defer s.mu.Unlock()
 	if _, ok := s.orgs[p.OrganizationID]; !ok {
 		return XeroBillPosting{}, fmt.Errorf("%w: organization %s", ErrNotFound, p.OrganizationID)
+	}
+	// The ledger references real runs and employees (mirrors the Postgres FKs).
+	if _, ok := s.payrollRuns[gkey(p.OrganizationID, p.RunID)]; !ok {
+		return XeroBillPosting{}, fmt.Errorf("%w: payroll run %s", ErrNotFound, p.RunID)
+	}
+	if _, ok := s.employees[gkey(p.OrganizationID, p.EmployeeID)]; !ok {
+		return XeroBillPosting{}, fmt.Errorf("%w: employee %s", ErrNotFound, p.EmployeeID)
 	}
 	idxKey := p.OrganizationID + "\x00" + p.RunID + "\x00" + p.EmployeeID
 	if _, ok := s.xeroPostIndex[idxKey]; ok {
