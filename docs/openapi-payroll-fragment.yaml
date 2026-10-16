@@ -1,0 +1,870 @@
+# OpenAPI 3.1 fragment — forge-hris component 5 (payroll).
+#
+# Worker C merges this into docs/openapi.yaml:
+#   - append `paths` entries under the existing `paths:`
+#   - merge `components.schemas` into the existing `components:`
+#   - extend the info.description title to mention component 5, bump version.
+#
+# Conventions follow docs/openapi.yaml: flat error envelope
+# {"code","message","details","request_id"}, cursor pagination
+# {data, next_cursor, has_more}, Idempotency-Key on POSTs.
+#
+# Money is int64 minor units everywhere (sen for MYR, whole rupiah for IDR).
+# Payroll run lifecycle: draft -> approved -> locked (cancelled is terminal
+# from draft or approved). Only draft runs accept calculate / sync-items.
+# Submit is a two-phase gate: POST .../preview first (30-minute TTL), then
+# POST .../submit with the preview_id and the run's current version.
+
+paths:
+  /api/v1/organizations/{orgId}/payroll-runs:
+    post:
+      summary: Draft a payroll run
+      description: |
+        Creates a draft payroll run for a YYYY-MM period. The statutory rule
+        pack version is pinned from the country code (my-2026-10 / id-2026-10).
+        (organization_id, period) is unique: redrafting a period returns
+        409 ALREADY_EXISTS. Requires manager role or higher (service accounts: the payroll:preview scope).
+      operationId: createPayrollRun
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [period, country_code]
+              properties:
+                period: { type: string, example: '2026-10', description: YYYY-MM }
+                country_code: { type: string, enum: [MY, ID] }
+      responses:
+        '201':
+          description: Draft run created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PayrollRun' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/AlreadyExists' }
+    get:
+      summary: List payroll runs
+      description: |
+        Lists runs ordered by (created_at, id), paged. Filter by status and
+        period. Requires manager role or higher (service accounts: the payroll:read scope). Members hold payroll:read for own-payslip self-service only.
+      operationId: listPayrollRuns
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - name: status
+          in: query
+          schema: { type: string, enum: [draft, approved, locked, cancelled] }
+        - name: period
+          in: query
+          schema: { type: string, example: '2026-10' }
+      responses:
+        '200':
+          description: Paged runs
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PayrollRunList' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/organizations/{orgId}/payroll-runs/{id}:
+    get:
+      summary: Get a payroll run
+      description: Requires manager role or higher. Service accounts need the payroll:read scope. Members hold payroll:read for own-payslip self-service only.
+      operationId: getPayrollRun
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: The run
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PayrollRun' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/organizations/{orgId}/payroll-runs/{id}/calculate:
+    post:
+      summary: Calculate pay lines for a draft run
+      description: |
+        Runs the statutory engine over the supplied employees and upserts one
+        pay line per employee. Re-running is safe (optimistic concurrency on
+        the stored lines). Approved unpaid leave overlapping the run month is
+        auto-folded as an unpaid_leave_deduction (daily rate = base salary /
+        26, a documented simplification), and staged sync items are folded in.
+        Emits payroll.calculated. Requires manager role or higher (service accounts: the payroll:preview scope). Non-draft runs return 409 RUN_NOT_DRAFT.
+      operationId: calculatePayrollRun
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CalculatePayroll' }
+      responses:
+        '200':
+          description: Calculated pay lines
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [run_id, lines]
+                properties:
+                  run_id: { type: string }
+                  lines:
+                    type: array
+                    items: { $ref: '#/components/schemas/EmployeePayLine' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/RunNotDraft' }
+
+  /api/v1/organizations/{orgId}/payroll-runs/{id}/preview:
+    post:
+      summary: Dry-run preview with diff against the previous run
+      description: |
+        Same body as calculate, but nothing is persisted except the 30-minute
+        preview payload that submit requires. Diffs every employee against the
+        latest non-cancelled run of an earlier period (NO_PRIOR_RUN when
+        there is none) with anomaly flags (NET_SWING_GT_20, NEW_EMPLOYEE,
+        MISSING_BANK_DETAILS). No audit event: previews are read-only.
+        Requires manager role or higher (service accounts: the payroll:preview scope).
+      operationId: previewPayrollRun
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CalculatePayroll' }
+      responses:
+        '200':
+          description: Preview with diff and totals
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PayrollPreviewResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/RunNotDraft' }
+
+  /api/v1/organizations/{orgId}/payroll-runs/{id}/submit:
+    post:
+      summary: Submit a draft run (preview -> submit gate)
+      description: |
+        Moves draft -> approved. The gate mirrors the hris.submit_payroll MCP
+        tool exactly: the run must be draft; preview_id must reference an
+        existing, unexpired preview (30-minute TTL) that belongs to this run —
+        missing/expired/foreign previews return 409 PREVIEW_REQUIRED /
+        PREVIEW_STALE; then the version-checked transition runs. Emits
+        payroll.submitted plus one payslip.issued per pay line. Requires admin role or higher (service accounts: the payroll:submit scope) — never bundled with the preview scope. Idempotent via Idempotency-Key.
+      operationId: submitPayrollRun
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [preview_id, version]
+              properties:
+                preview_id: { type: string }
+                version: { type: integer, description: Run's current version (optimistic concurrency) }
+      responses:
+        '200':
+          description: Run approved
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PayrollRun' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/PreviewRequired' }
+
+  /api/v1/organizations/{orgId}/payroll-runs/{id}/lock:
+    post:
+      summary: Lock an approved run
+      description: |
+        Moves approved -> locked. Locked runs are immutable: calculate,
+        sync-items, submit, and cancel are all rejected. Requires admin role or higher (service accounts: the payroll:submit scope).
+      operationId: lockPayrollRun
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version]
+              properties:
+                version: { type: integer }
+      responses:
+        '200':
+          description: Run locked
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PayrollRun' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/IllegalRunTransition' }
+
+  /api/v1/organizations/{orgId}/payroll-runs/{id}/cancel:
+    post:
+      summary: Cancel a draft or approved run
+      description: |
+        Moves draft|approved -> cancelled. Requires the payroll:submit scope
+        or admin role.
+      operationId: cancelPayrollRun
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version]
+              properties:
+                version: { type: integer }
+      responses:
+        '200':
+          description: Run cancelled
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PayrollRun' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/IllegalRunTransition' }
+
+  /api/v1/organizations/{orgId}/payroll-runs/{id}/sync-items:
+    post:
+      summary: Stage external payroll items on a draft run
+      description: |
+        Atomically appends externally-ingested items (attendance, claims)
+        that the next calculate call folds into the pay lines. Draft runs
+        only (409 RUN_NOT_DRAFT otherwise). Requires manager role or higher (service accounts: the payroll:preview scope).
+      operationId: addPayrollSyncItems
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  items: { $ref: '#/components/schemas/SyncItemInput' }
+      responses:
+        '201':
+          description: Items staged
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [run_id, added]
+                properties:
+                  run_id: { type: string }
+                  added: { type: integer }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/RunNotDraft' }
+
+  /api/v1/organizations/{orgId}/payroll-runs/{id}/payslips/{employeeId}:
+    get:
+      summary: Get an employee's payslip
+      description: |
+        Returns the pay line as JSON, or as rendered HTML with ?format=html.
+        Members may only read their own payslip; everyone else needs the
+        payroll:read scope.
+      operationId: getPayslip
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: employeeId
+          in: path
+          required: true
+          schema: { type: string }
+        - name: format
+          in: query
+          schema: { type: string, enum: [json, html], default: json }
+      responses:
+        '200':
+          description: The payslip (JSON pay line, or text/html)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EmployeePayLine' }
+            text/html:
+              schema: { type: string }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/organizations/{orgId}/payroll-runs/{id}/bank-file:
+    get:
+      summary: Generate the salary-credit bank file
+      description: |
+        Renders the bulk salary-credit file for an approved or locked run
+        (409 RUN_NOT_APPROVED otherwise) as a text download. Every pay line is
+        included — including employees with no bank account on file (empty
+        account field; fix the record and regenerate) — with amounts in minor
+        units. Maybank layout is a template: verify against the bank's current
+        spec before use. Requires manager role or higher (service accounts: the payroll:read scope); members hold payroll:read for own-payslip self-service only and are rejected here.
+      operationId: payrollBankFile
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: format
+          in: query
+          schema: { type: string, enum: [pipe, maybank], default: pipe }
+      responses:
+        '200':
+          description: Bank file download
+          content:
+            text/plain:
+              schema: { type: string }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/RunNotApproved' }
+
+  /api/v1/organizations/{orgId}/payroll-runs/{id}/exports/epf-csv:
+    get:
+      summary: EPF contribution CSV (MY only)
+      description: |
+        Renders the EPF i-Akaun-style contribution CSV for an approved or
+        locked MY run. The contribution-wage base is re-derived from the
+        stored line items with the engine's rule (additions flagged
+        SubjectToEPF minus deductions flagged ReducesContributionWages).
+        VERIFY column order and amount format against KWSP's current upload
+        spec before filing. Non-MY runs return 409 WRONG_COUNTRY. Requires
+        manager role or higher (service accounts: the payroll:read scope); members hold payroll:read for own-payslip self-service only and are rejected here.
+      operationId: payrollEPFExport
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: EPF CSV download
+          content:
+            text/csv:
+              schema: { type: string }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/WrongCountry' }
+
+  /api/v1/organizations/{orgId}/payroll-runs/{id}/exports/pcb-txt:
+    get:
+      summary: Monthly PCB data file (MY only)
+      description: |
+        Renders the LHDN e-Data PCB-style monthly tax file for an approved or
+        locked MY run. Employees carry no tax-ID field: TaxIDNo is empty and
+        the filer fills it from their own records. VERIFY the record layout
+        against LHDN's current spec before filing. Non-MY runs return 409
+        WRONG_COUNTRY. Requires manager role or higher (service accounts: the payroll:read scope); members hold
+        payroll:read for own-payslip self-service only and are rejected here.
+      operationId: payrollPCBExport
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: PCB txt download
+          content:
+            text/plain:
+              schema: { type: string }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/WrongCountry' }
+
+  /api/v1/organizations/{orgId}/payroll-runs/{id}/exports/borang-a:
+    get:
+      summary: Borang A summary (MY only)
+      description: |
+        Renders a plain-text Borang A (EPF Form A) summary — totals plus a
+        per-employee breakdown — for an approved or locked MY run. Non-MY
+        runs return 409 WRONG_COUNTRY. Requires manager role or higher (service accounts: the payroll:read scope); members hold payroll:read for own-payslip self-service only and are rejected here.
+      operationId: payrollBorangAExport
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Borang A summary download
+          content:
+            text/plain:
+              schema: { type: string }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/WrongCountry' }
+
+  /api/v1/organizations/{orgId}/payroll-presets:
+    post:
+      summary: Create a payroll item preset
+      description: |
+        Creates an organization-level item preset. Codes must not collide with
+        a seed code or another org preset (409 ALREADY_EXISTS). Requires admin role or higher (service accounts: the payroll:preview scope).
+      operationId: createPayrollPreset
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreatePayrollPreset' }
+      responses:
+        '201':
+          description: Preset created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PayrollItemPreset' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/AlreadyExists' }
+    get:
+      summary: List payroll item presets
+      description: |
+        Returns the merged catalog: system seed presets (is_system, id
+        "sys:<code>", immutable) first, then the organization's own presets,
+        paged. Requires the payroll:preview scope or admin role.
+      operationId: listPayrollPresets
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Paged presets
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PayrollItemPresetList' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/organizations/{orgId}/payroll-presets/{id}:
+    patch:
+      summary: Update a payroll item preset
+      description: |
+        Version-checked update of an organization preset. System presets are
+        immutable (409 SYSTEM_PRESET_IMMUTABLE) — create an organization
+        preset instead. Requires the payroll:preview scope or admin role.
+      operationId: patchPayrollPreset
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: id
+          in: path
+          required: true
+          description: Preset ID, or "sys:<code>" for seed presets
+          schema: { type: string }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PatchPayrollPreset' }
+      responses:
+        '200':
+          description: Preset updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PayrollItemPreset' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/SystemPresetImmutable' }
+
+components:
+  responses:
+    RunNotDraft:
+      description: Run is not in draft status; pay lines and sync items can only change on draft runs.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            notDraft:
+              value:
+                code: RUN_NOT_DRAFT
+                message: 'store: payroll run not draft: payroll run <id> is locked'
+                request_id: abc123
+
+    IllegalRunTransition:
+      description: The requested run status transition is not allowed (draft->approved/cancelled and approved->locked/cancelled are the only legal moves).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            illegal:
+              value:
+                code: ILLEGAL_TRANSITION
+                message: 'state transition not allowed: store: illegal payroll run transition: locked -> cancelled'
+                request_id: abc123
+
+    SystemPresetImmutable:
+      description: System (seed) payroll item presets cannot be updated; create an organization preset instead.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            immutable:
+              value:
+                code: SYSTEM_PRESET_IMMUTABLE
+                message: system presets are immutable; create an organization preset instead
+                request_id: abc123
+
+    PreviewRequired:
+      description: Submit requires a preview first (POST .../preview).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            required:
+              value:
+                code: PREVIEW_REQUIRED
+                message: 'submit requires a preview: POST /payroll-runs/{id}/preview first'
+                request_id: abc123
+
+    PreviewStale:
+      description: The preview is unknown, expired (30-minute TTL), or belongs to a different run.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            stale:
+              value:
+                code: PREVIEW_STALE
+                message: 'preview not found or expired; generate a fresh preview'
+                request_id: abc123
+
+    RunNotApproved:
+      description: Bank files and statutory exports require an approved or locked run.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            notApproved:
+              value:
+                code: RUN_NOT_APPROVED
+                message: run must be approved or locked before files can be generated
+                request_id: abc123
+
+    WrongCountry:
+      description: The statutory export is only available for MY payroll runs.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            wrongCountry:
+              value:
+                code: WRONG_COUNTRY
+                message: this export is only available for MY payroll runs
+                request_id: abc123
+
+  schemas:
+    PayrollRun:
+      type: object
+      required: [id, organization_id, period, country_code, status, created_at, updated_at, version]
+      properties:
+        id: { type: string }
+        organization_id: { type: string }
+        period: { type: string, example: '2026-10' }
+        country_code: { type: string, enum: [MY, ID] }
+        status: { type: string, enum: [draft, approved, locked, cancelled] }
+        rule_pack_version: { type: string, example: my-2026-10 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        version: { type: integer }
+    PayrollRunList:
+      type: object
+      required: [data, next_cursor, has_more]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/PayrollRun' }
+        next_cursor: { type: string }
+        has_more: { type: boolean }
+
+    PayLineItem:
+      type: object
+      description: One computed payroll line item.
+      properties:
+        preset_code: { type: string }
+        name: { type: string }
+        kind: { type: string, enum: [addition, deduction, employer_contribution] }
+        amount_minor: { type: integer, description: Minor units (sen / rupiah) }
+        note: { type: string }
+    StatutorySplits:
+      type: object
+      description: Computed statutory amounts; SOCSOEmployee includes the SKBBK employee share when applicable.
+      properties:
+        epf_employee: { type: integer }
+        epf_employer: { type: integer }
+        socso_employee: { type: integer }
+        socso_employer: { type: integer }
+        eis_employee: { type: integer }
+        eis_employer: { type: integer }
+        pcb: { type: integer }
+        hrdf_employer: { type: integer }
+        bpjs_kes_employer: { type: integer }
+        bpjs_kes_employee: { type: integer }
+        jht_employer: { type: integer }
+        jht_employee: { type: integer }
+        jkk_employer: { type: integer }
+        jkm_employer: { type: integer }
+        jp_employer: { type: integer }
+        jp_employee: { type: integer }
+        pph21: { type: integer }
+    EmployeePayLine:
+      type: object
+      required: [id, organization_id, run_id, employee_id, gross_minor, additions_minor, deductions_minor, net_minor, statutory, created_at, updated_at, version]
+      properties:
+        id: { type: string }
+        organization_id: { type: string }
+        run_id: { type: string }
+        employee_id: { type: string }
+        gross_minor: { type: integer }
+        additions_minor: { type: integer }
+        deductions_minor: { type: integer }
+        net_minor: { type: integer }
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/PayLineItem' }
+        statutory: { $ref: '#/components/schemas/StatutorySplits' }
+        bank_account: { type: string }
+        bank_code: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        version: { type: integer }
+
+    CalculatePayroll:
+      type: object
+      required: [employees]
+      properties:
+        employees:
+          type: array
+          items:
+            type: object
+            required: [employee_id]
+            properties:
+              employee_id: { type: string }
+              base_salary_minor: { type: integer }
+              items:
+                type: array
+                items:
+                  type: object
+                  required: [preset_code]
+                  properties:
+                    preset_code: { type: string }
+                    amount_minor: { type: integer }
+              age_years: { type: integer }
+              citizen_my: { type: boolean }
+              foreign_worker_my: { type: boolean }
+              pr_my: { type: boolean }
+              skbbk_opt_in: { type: boolean }
+              employer_borne_pcb: { type: boolean }
+              jkk_risk_class: { type: integer, description: 1..5 (ID) }
+              ptkp_status: { type: string, example: 'TK/0', description: ID }
+              bank_account: { type: string }
+              bank_code: { type: string }
+
+    PreviewAnomaly:
+      type: object
+      properties:
+        employee_id: { type: string }
+        code:
+          type: string
+          enum: [NET_SWING_GT_20, NEW_EMPLOYEE, MISSING_BANK_DETAILS, NO_PRIOR_RUN]
+        message: { type: string }
+    EmployeePreview:
+      type: object
+      description: Per-employee diff between two runs.
+      properties:
+        employee_id: { type: string }
+        prev_net_minor: { type: integer }
+        new_net_minor: { type: integer }
+        diff_minor: { type: integer }
+        diff_pct: { type: number }
+        anomalies:
+          type: array
+          items: { $ref: '#/components/schemas/PreviewAnomaly' }
+    PayrollPreviewResponse:
+      type: object
+      required: [preview_id, expires_at, employees, totals]
+      properties:
+        preview_id: { type: string }
+        expires_at: { type: string, format: date-time }
+        employees:
+          type: array
+          items: { $ref: '#/components/schemas/EmployeePreview' }
+        totals:
+          type: object
+          required: [employee_count, gross_minor, net_minor]
+          properties:
+            employee_count: { type: integer }
+            gross_minor: { type: integer }
+            net_minor: { type: integer }
+
+    PayrollItemPreset:
+      type: object
+      required: [id, organization_id, code, name, kind, created_at, updated_at, version]
+      properties:
+        id: { type: string, description: '"sys:<code>" for seed presets' }
+        organization_id: { type: string }
+        code: { type: string }
+        name: { type: string }
+        kind: { type: string, enum: [addition, deduction, employer_contribution] }
+        subject_to_epf: { type: boolean }
+        subject_to_socso: { type: boolean }
+        subject_to_eis: { type: boolean }
+        subject_to_pcb: { type: boolean }
+        subject_to_bpjs_kes: { type: boolean }
+        subject_to_jht: { type: boolean }
+        subject_to_jkk: { type: boolean }
+        subject_to_jkm: { type: boolean }
+        subject_to_jp: { type: boolean }
+        subject_to_pph21: { type: boolean }
+        reduces_contribution_wages: { type: boolean }
+        is_system: { type: boolean, description: Seed preset; immutable }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        version: { type: integer }
+    PayrollItemPresetList:
+      type: object
+      required: [data, next_cursor, has_more]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/PayrollItemPreset' }
+        next_cursor: { type: string }
+        has_more: { type: boolean }
+    CreatePayrollPreset:
+      type: object
+      required: [code, name, kind]
+      properties:
+        code: { type: string }
+        name: { type: string }
+        kind: { type: string, enum: [addition, deduction, employer_contribution] }
+        subject_to_epf: { type: boolean }
+        subject_to_socso: { type: boolean }
+        subject_to_eis: { type: boolean }
+        subject_to_pcb: { type: boolean }
+        subject_to_bpjs_kes: { type: boolean }
+        subject_to_jht: { type: boolean }
+        subject_to_jkk: { type: boolean }
+        subject_to_jkm: { type: boolean }
+        subject_to_jp: { type: boolean }
+        subject_to_pph21: { type: boolean }
+        reduces_contribution_wages: { type: boolean }
+    PatchPayrollPreset:
+      type: object
+      required: [version]
+      properties:
+        name: { type: string }
+        kind: { type: string, enum: [addition, deduction, employer_contribution] }
+        subject_to_epf: { type: boolean }
+        subject_to_socso: { type: boolean }
+        subject_to_eis: { type: boolean }
+        subject_to_pcb: { type: boolean }
+        subject_to_bpjs_kes: { type: boolean }
+        subject_to_jht: { type: boolean }
+        subject_to_jkk: { type: boolean }
+        subject_to_jkm: { type: boolean }
+        subject_to_jp: { type: boolean }
+        subject_to_pph21: { type: boolean }
+        reduces_contribution_wages: { type: boolean }
+        version: { type: integer }
+
+    SyncItemInput:
+      type: object
+      required: [employee_id, kind, preset_code]
+      properties:
+        employee_id: { type: string }
+        source: { type: string }
+        external_id: { type: string }
+        label: { type: string }
+        kind: { type: string, enum: [addition, deduction] }
+        preset_code: { type: string }
+        amount_minor: { type: integer }

@@ -667,8 +667,8 @@ func TestJSONRPC(t *testing.T) {
 		raw := dispatchStr(t, srv, sess,
 			`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`)
 		tools, _ := rpcResponse(t, raw)["result"].(map[string]any)["tools"].([]any)
-		if len(tools) != 29 {
-			t.Fatalf("tools/list returned %d tools, want 29", len(tools))
+		if len(tools) != 37 {
+			t.Fatalf("tools/list returned %d tools, want 37", len(tools))
 		}
 		raw = dispatchStr(t, srv, sess,
 			`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"hris.clock_in","arguments":{"occurred_at":"2026-10-16T09:00:00Z"}}}`)

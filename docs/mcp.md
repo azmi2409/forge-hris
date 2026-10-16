@@ -1,7 +1,7 @@
 # MCP server (component 4)
 
 The forge-hris agent surface: a JSON-RPC 2.0 MCP server (`mcp/` package,
-`cmd/forge-hris-mcp`) exposing 29 `hris.*` tools over the **same store
+`cmd/forge-hris-mcp`) exposing 37 `hris.*` tools over the **same store
 calls the REST handlers use**, so REST and MCP never drift. Protocol
 version `2024-11-05`.
 
@@ -38,8 +38,20 @@ version `2024-11-05`.
 | `hris.get_leave_report` | auto | `leave:read` | Requests + balance ledger rows |
 | `hris.get_audit_log` | auto | `audit:read` | Hash-chained audit log (filter actor/action/type/since) |
 | `hris.get_overtime_report` | auto | `time:read` | Overtime buckets over a range (mirrors `POST /overtime/preview`) |
+| `hris.list_payroll_runs` | auto | `payroll:read` | List payroll runs (filter status/period, paginated) |
+| `hris.get_payroll_run` | auto | `payroll:read` | One payroll run; `lines:true` attaches computed pay lines |
+| `hris.draft_payroll_run` | auto | `payroll:preview` | Draft a run for a YYYY-MM period (MY\|ID); emits `payroll.drafted` |
+| `hris.preview_payroll` | auto | `payroll:preview` | Dry-run calculation + diff vs previous run + anomaly flags; saves a 30-minute preview; persists pay lines on the draft; emits `payroll.calculated` |
+| `hris.submit_payroll` | **never** | `payroll:submit` + admin+ | Submit (draft → approved). Two-phase: first call returns totals + anomaly count; follow-up needs resume token + `confirmed:true`. Requires a live preview (`preview_id` + run version). Fans one `payslip.issued` per pay line |
+| `hris.cancel_payroll_run` | **confirm** | `payroll:submit` + admin+ | Cancel (draft/approved → cancelled); lines kept for audit |
+| `hris.get_payslip` | auto | `payroll:read` | One employee's payslip for a run (members: self only) |
+| `hris.list_pay_schedules` | auto | `payroll:read` | Pay-period definitions + the monthly (YYYY-MM) payroll cadence note |
 
-No payroll tools: those land with component 5.
+The payroll tools implement the same two-phase preview → submit gate as the
+REST surface (see `docs/payroll.md`): `hris.preview_payroll` computes and
+stores a 30-minute preview payload; `hris.submit_payroll` replays the gate
+(run must be draft, preview live and matching, version current) before
+moving draft → approved.
 
 Tool annotations (`readOnlyHint` / `destructiveHint` / `idempotentHint` /
 `openWorldHint`) are advertised in `tools/list` but are **hints only**; the

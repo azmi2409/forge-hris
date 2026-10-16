@@ -44,6 +44,10 @@ func mapStoreError(err error) *ToolError {
 		return toolErr("PERIOD_LOCKED", "entry falls in a submitted or approved pay period and cannot be changed")
 	case errors.Is(err, store.ErrInvalidTransition):
 		return toolErr("INVALID_TRANSITION", "state transition not allowed: "+err.Error())
+	case errors.Is(err, store.ErrRunNotDraft):
+		return toolErr("RUN_NOT_DRAFT", err.Error())
+	case errors.Is(err, store.ErrIllegalRunTransition):
+		return toolErr("ILLEGAL_RUN_TRANSITION", "illegal payroll run transition: "+err.Error())
 	case errors.Is(err, store.ErrInsufficientBalance):
 		return toolErr("INSUFFICIENT_BALANCE", err.Error())
 	case errors.Is(err, store.ErrNotCurrentApprover):

@@ -15,7 +15,8 @@ import (
 // Sentinel errors returned by Store implementations. Use errors.Is to match.
 var (
 	// ErrNotFound means no such organization, group, employee, membership,
-	// credential, audit event, or idempotency record.
+	// credential, audit event, idempotency record, payroll run, pay line,
+	// item preset, sync item, or payroll preview.
 	ErrNotFound = errors.New("store: not found")
 	// ErrAlreadyExists means the slug, employee number, email, token hash,
 	// or id is already taken.
@@ -29,6 +30,17 @@ var (
 	// ErrCredentialInvalid means the credential is revoked or expired.
 	// Unknown token hashes return ErrNotFound.
 	ErrCredentialInvalid = errors.New("store: credential invalid")
+	// ErrSystemPresetImmutable means the operation targeted a system (seed)
+	// payroll item preset, which cannot be updated or deleted. Create an
+	// organization-level preset instead.
+	ErrSystemPresetImmutable = errors.New("store: system preset immutable")
+	// ErrRunNotDraft means the payroll run is not in draft status. Pay
+	// lines and sync items can only change on draft runs.
+	ErrRunNotDraft = errors.New("store: payroll run not draft")
+	// ErrIllegalRunTransition means the requested payroll run status
+	// transition is not allowed (draft->approved/cancelled and
+	// approved->locked/cancelled are the only legal moves).
+	ErrIllegalRunTransition = errors.New("store: illegal payroll run transition")
 )
 
 // Pagination bounds. Agents page aggressively; the store caps pages so one
@@ -163,6 +175,7 @@ type Store interface {
 	TimeTrackingStore
 	LeaveStore
 	WebhookStore
+	PayrollStore
 
 	// Organizations.
 	// CreateOrganization stores a new organization. An empty ID is

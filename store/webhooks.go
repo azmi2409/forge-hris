@@ -48,6 +48,26 @@ const (
 	// WebhookEventWebhookTest is the synthetic event enqueued by POST
 	// /webhooks/{id}/test (the Jibble-style TestWebhook).
 	WebhookEventWebhookTest = "webhook.test"
+	// WebhookEventPayrollDrafted is emitted when a payroll run is drafted:
+	// the REST payroll-run create endpoint and the hris.draft_payroll_run
+	// MCP tool.
+	WebhookEventPayrollDrafted = "payroll.drafted"
+	// WebhookEventPayrollCalculated is emitted when a draft run's pay is
+	// (re)calculated: the REST payroll-run preview endpoint and the
+	// hris.preview_payroll MCP tool.
+	WebhookEventPayrollCalculated = "payroll.calculated"
+	// WebhookEventPayrollSubmitted is emitted when a run passes the
+	// preview -> submit gate (draft -> approved): the REST payroll-run
+	// submit endpoint and the hris.submit_payroll MCP tool.
+	WebhookEventPayrollSubmitted = "payroll.submitted"
+	// WebhookEventPayrollCancelled is emitted when a run is cancelled
+	// (draft/approved -> cancelled): the REST payroll-run cancel endpoint
+	// and the hris.cancel_payroll_run MCP tool.
+	WebhookEventPayrollCancelled = "payroll.cancelled"
+	// WebhookEventPayslipIssued is emitted once per pay line when a run is
+	// submitted (REST submit and hris.submit_payroll fan one event per
+	// payslip).
+	WebhookEventPayslipIssued = "payslip.issued"
 	// WebhookEventWildcard matches every event type in a subscription.
 	WebhookEventWildcard = "*"
 )
@@ -68,6 +88,11 @@ var webhookEventTypes = map[string]bool{
 	WebhookEventAPITokenCreated:     true,
 	WebhookEventAPITokenRevoked:     true,
 	WebhookEventWebhookTest:         true,
+	WebhookEventPayrollDrafted:      true,
+	WebhookEventPayrollCalculated:   true,
+	WebhookEventPayrollSubmitted:    true,
+	WebhookEventPayrollCancelled:    true,
+	WebhookEventPayslipIssued:       true,
 	WebhookEventWildcard:            true,
 }
 

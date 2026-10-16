@@ -1,6 +1,6 @@
 package mcp
 
-// Registry tests: the 29-tool contract — names, schemas, tiers, scopes,
+// Registry tests: the 37-tool contract — names, schemas, tiers, scopes,
 // annotations, and the confirm/never preview invariant.
 
 import (
@@ -26,6 +26,10 @@ var expectedTools = []string{
 	// reports (4)
 	"hris.get_attendance_report", "hris.get_leave_report", "hris.get_audit_log",
 	"hris.get_overtime_report",
+	// payroll (8)
+	"hris.list_payroll_runs", "hris.get_payroll_run", "hris.draft_payroll_run",
+	"hris.preview_payroll", "hris.submit_payroll", "hris.cancel_payroll_run",
+	"hris.get_payslip", "hris.list_pay_schedules",
 }
 
 var expectedTiers = map[string]Tier{
@@ -36,15 +40,17 @@ var expectedTiers = map[string]Tier{
 	"hris.approve_leave":       TierConfirm,
 	"hris.reject_leave":        TierConfirm,
 	"hris.approve_leave_bulk":  TierNever,
+	"hris.submit_payroll":      TierNever,
+	"hris.cancel_payroll_run":  TierConfirm,
 }
 
 func TestRegistry(t *testing.T) {
 	srv := NewServer(store.NewMemoryStore(), nil)
 	reg := srv.Registry()
 
-	t.Run("count is 29", func(t *testing.T) {
-		if got := len(reg.All()); got != 29 {
-			t.Fatalf("registry has %d tools, want 29", got)
+	t.Run("count is 37", func(t *testing.T) {
+		if got := len(reg.All()); got != 37 {
+			t.Fatalf("registry has %d tools, want 37", got)
 		}
 	})
 
@@ -125,8 +131,8 @@ func TestRegistry(t *testing.T) {
 		for _, d := range reg.All() {
 			counts[d.Tier]++
 		}
-		if counts[TierConfirm] != 6 || counts[TierNever] != 1 || counts[TierAuto] != 22 {
-			t.Errorf("tier distribution = %v, want auto:22 confirm:6 never:1", counts)
+		if counts[TierConfirm] != 7 || counts[TierNever] != 2 || counts[TierAuto] != 28 {
+			t.Errorf("tier distribution = %v, want auto:28 confirm:7 never:2", counts)
 		}
 	})
 
@@ -136,8 +142,8 @@ func TestRegistry(t *testing.T) {
 			t.Fatal("tools/list did not return an object")
 		}
 		listed := listedAny["tools"].([]toolJSON)
-		if len(listed) != 29 {
-			t.Fatalf("tools/list returned %d tools, want 29", len(listed))
+		if len(listed) != 37 {
+			t.Fatalf("tools/list returned %d tools, want 37", len(listed))
 		}
 		for _, item := range listed {
 			def, ok := reg.Get(item.Name)

@@ -42,6 +42,14 @@ type MemoryStore struct {
 	// --- webhooks (component 4) ---
 	webhookSubs   map[string]WebhookSubscription // orgID + "\x00" + id
 	webhookOutbox map[string]WebhookOutbox       // message id
+	// --- payroll (component 5) ---
+	payrollRuns      map[string]PayrollRun        // orgID + "\x00" + id
+	payrollRunPeriod map[string]string            // orgID + "\x00" + period -> run id
+	payLines         map[string]EmployeePayLine   // orgID + "\x00" + runID + "\x00" + employeeID
+	payPresets       map[string]PayrollItemPreset // orgID + "\x00" + id
+	payPresetCodes   map[string]string            // orgID + "\x00" + code -> preset id
+	paySyncItems     map[string]SyncItem          // orgID + "\x00" + id
+	payPreviews      map[string]PayrollPreview    // orgID + "\x00" + id
 }
 
 // NewMemoryStore returns an empty MemoryStore.
@@ -68,6 +76,14 @@ func NewMemoryStore() *MemoryStore {
 		// --- webhooks (component 4) ---
 		webhookSubs:   make(map[string]WebhookSubscription),
 		webhookOutbox: make(map[string]WebhookOutbox),
+		// --- payroll (component 5) ---
+		payrollRuns:      make(map[string]PayrollRun),
+		payrollRunPeriod: make(map[string]string),
+		payLines:         make(map[string]EmployeePayLine),
+		payPresets:       make(map[string]PayrollItemPreset),
+		payPresetCodes:   make(map[string]string),
+		paySyncItems:     make(map[string]SyncItem),
+		payPreviews:      make(map[string]PayrollPreview),
 	}
 }
 

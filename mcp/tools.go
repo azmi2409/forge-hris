@@ -146,8 +146,9 @@ func write(title string) ToolAnnotations {
 	return ToolAnnotations{Title: title}
 }
 
-// newRegistry builds the 29-tool registry. Handlers are methods on s so
-// they share the store; every store call mirrors its REST counterpart.
+// newRegistry builds the 37-tool registry (29 base + 8 payroll). Handlers
+// are methods on s so they share the store; every store call mirrors its
+// REST counterpart.
 func newRegistry(s *Server) *Registry {
 	defs := []*ToolDef{
 		// ---- identity (7) ----
@@ -627,6 +628,7 @@ func newRegistry(s *Server) *Registry {
 			Handler:       s.handleGetOvertimeReport,
 		},
 	}
+	defs = append(defs, payrollTools(s)...)
 	byName := make(map[string]*ToolDef, len(defs))
 	for _, d := range defs {
 		byName[d.Name] = d

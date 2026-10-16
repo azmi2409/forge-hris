@@ -88,6 +88,7 @@ func scopesForRole(role store.Role) []string {
 			store.ScopeEmployeesRead,
 			store.ScopeTimeRead, store.ScopeTimeWrite,
 			store.ScopeLeaveRead, store.ScopeLeaveWrite, store.ScopeLeaveApprove,
+			store.ScopePayrollRead, store.ScopePayrollPreview,
 			store.ScopeAuditRead,
 		}
 	case store.RoleMember:
@@ -95,6 +96,7 @@ func scopesForRole(role store.Role) []string {
 			store.ScopeEmployeesRead,
 			store.ScopeTimeRead, store.ScopeTimeWrite,
 			store.ScopeLeaveRead, store.ScopeLeaveWrite,
+			store.ScopePayrollRead, // own payslip only; the self-check in the handler enforces it
 		}
 	default:
 		return nil

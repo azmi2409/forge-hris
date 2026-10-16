@@ -11,7 +11,9 @@ Full reverse-engineering analysis: [`docs/rea-hris.md`](docs/rea-hris.md).
 
 ## Status
 
-Pre-build. The REA is complete; component implementation follows the plan in [`TODO.md`](TODO.md).
+Components 1–5 done (core platform, time tracking, leave, agent surface,
+payroll engine); component 6 (integrations) remains. Build progress in
+[`TODO.md`](TODO.md).
 
 ## Build plan (summary)
 
@@ -89,6 +91,49 @@ curl -s -X POST "localhost:8080/api/v1/organizations/$ORG/leave-requests/$REQ/ap
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["request"]["status"])'
 # approved
 ```
+
+Payroll (component 5): draft → preview → submit. Money movement is never
+single-step — the submit gate requires a live preview payload.
+
+```bash
+# Draft a run for October 2026 (one run per YYYY-MM period)
+RUN=$(curl -s -X POST "localhost:8080/api/v1/organizations/$ORG/payroll-runs" \
+  -H "Authorization: Bearer $PAT" -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: run-202610-01' \
+  -d '{"period":"2026-10","country_code":"MY"}' \
+  | python3 -c 'import json,sys; d=json.load(sys.stdin)["payroll_run"]; print(d["id"], d["version"])')
+RUN_ID=$(echo "$RUN" | cut -d' ' -f1); RUN_VER=$(echo "$RUN" | cut -d' ' -f2)
+
+# Preview: dry-run payroll.Calculate over the inputs (all amounts in sen),
+# diff against the previous run with anomaly flags, save the 30-minute
+# preview payload. (POST .../calculate is the lines-only dry-run variant;
+# preview additionally folds approved unpaid leave + staged sync items.)
+PV_ID=$(curl -s -X POST "localhost:8080/api/v1/organizations/$ORG/payroll-runs/$RUN_ID/preview" \
+  -H "Authorization: Bearer $PAT" -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: pv-202610-01' \
+  -d '{"employees":[{"employee_id":"'"$OWNER"'","base_salary_minor":500000,
+       "age_years":30,"citizen_my":true,"bank_account":"1234567890","bank_code":"MBB"}]}' \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["preview_id"])')
+
+# Submit: draft -> approved; fans payroll.submitted + one payslip.issued per line
+curl -s -X POST "localhost:8080/api/v1/organizations/$ORG/payroll-runs/$RUN_ID/submit" \
+  -H "Authorization: Bearer $PAT" -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: submit-202610-01' \
+  -d '{"preview_id":"'"$PV_ID"'","version":'"$RUN_VER"'}' \
+  | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["payroll_run"]["status"], d["payslips_issued"])'
+# approved 1
+
+# Payslip + statutory exports for the run
+curl -s "localhost:8080/api/v1/organizations/$ORG/payroll-runs/$RUN_ID/payslips/$OWNER" \
+  -H "Authorization: Bearer $PAT" | head -c 200
+curl -s "localhost:8080/api/v1/organizations/$ORG/payroll-runs/$RUN_ID/exports/epf-csv" \
+  -H "Authorization: Bearer $PAT" | head -3
+```
+
+The same gate is available to agents via the MCP tools (`hris.preview_payroll`
+→ `hris.submit_payroll`, two-phase with resume token + `confirmed:true`);
+see [`docs/payroll.md`](docs/payroll.md) for the rule packs, the verification
+warning, and the scopes/RBAC matrix.
 
 Against Postgres (schema is auto-applied on boot):
 

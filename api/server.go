@@ -136,6 +136,7 @@ func (s *Server) routes() {
 
 	s.timeRoutes()
 	s.leaveRoutes()
+	s.payrollRoutes()
 	s.webhookRoutes()
 	s.scimRoutes()
 }
@@ -217,9 +218,11 @@ func writeErrorDetails(w http.ResponseWriter, r *http.Request, status int, code,
 //
 // It covers the sentinels of all components: component 1 (identity), the
 // component 2 time-tracking sentinels (ALREADY_CLOCKED_IN, PERIOD_LOCKED,
-// INVALID_TRANSITION), and the component 3 leave sentinels
+// INVALID_TRANSITION), the component 3 leave sentinels
 // (INSUFFICIENT_BALANCE, NOT_CURRENT_APPROVER, INVALID_TRANSITION,
-// BULK_APPROVAL_FAILED with per-request results).
+// BULK_APPROVAL_FAILED with per-request results), and the component 5
+// payroll sentinels (RUN_NOT_DRAFT, ILLEGAL_TRANSITION,
+// SYSTEM_PRESET_IMMUTABLE).
 func mapError(w http.ResponseWriter, r *http.Request, err error) bool {
 	if err == nil {
 		return true
@@ -250,6 +253,13 @@ func mapError(w http.ResponseWriter, r *http.Request, err error) bool {
 		writeError(w, r, http.StatusConflict, "INSUFFICIENT_BALANCE", err.Error())
 	case errors.Is(err, store.ErrNotCurrentApprover):
 		writeError(w, r, http.StatusConflict, "NOT_CURRENT_APPROVER", err.Error())
+	case errors.Is(err, store.ErrRunNotDraft):
+		writeError(w, r, http.StatusConflict, "RUN_NOT_DRAFT", err.Error())
+	case errors.Is(err, store.ErrIllegalRunTransition):
+		writeError(w, r, http.StatusConflict, "ILLEGAL_TRANSITION",
+			"state transition not allowed: "+err.Error())
+	case errors.Is(err, store.ErrSystemPresetImmutable):
+		writeError(w, r, http.StatusConflict, "SYSTEM_PRESET_IMMUTABLE", err.Error())
 	default:
 		var berr *store.BulkApprovalError
 		if errors.As(err, &berr) {
