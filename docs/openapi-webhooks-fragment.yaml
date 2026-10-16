@@ -1,0 +1,301 @@
+# OpenAPI 3.1 fragment — forge-hris component 4 (webhooks).
+#
+# MERGE NOTES FOR WORKER C (do not ship this file standalone):
+# 1. Append every entry under `paths:` into the main openapi.yaml `paths:`
+#    (the main file uses `{orgId}` in path templates — kept here too).
+# 2. Append every entry under `components.schemas:` into the main
+#    `components.schemas:`. The `Error`, `OrgId`, `Limit`, `Cursor` refs
+#    already exist in the main file — do not duplicate.
+# 3. No new error codes: validation failures use VALIDATION_ERROR (400);
+#    unknown subscriptions return NOT_FOUND (404); non-admin callers get
+#    FORBIDDEN (403); cross-tenant access gets FORBIDDEN (403).
+# 4. Bump the main info.version / title to mention component 4 (webhooks).
+#
+# RBAC summary (mirrors api/webhooks.go):
+# - All six endpoints are admin+ within the caller's own organization.
+# - The signing secret is shown exactly once: in the POST create response
+#   (and echoed on PATCH when the caller rotates it). GET/list omit it.
+#
+# Delivery contract (mirrors api/webhook_dispatcher.go):
+# - Every delivery POSTs a JSON envelope {id, type, time, data} to the
+#   subscription URL with Content-Type: application/json.
+# - Authenticity: HMAC-SHA256 over the raw request body with the
+#   subscription secret, sent as X-Hub-Signature-256: sha256=<hex>.
+#   Also X-Webhook-ID (the message id) and X-Webhook-Event headers.
+# - 2xx marks the message sent; anything else retries on a backoff cadence
+#   (30s, 5m, 30m, 2h) and the message goes dead after 5 failed attempts.
+# - Delivery is AT-LEAST-ONCE: a crash between a successful POST and the
+#   sent-mark replays the message, so consumers MUST dedupe on envelope.id.
+#
+# Event taxonomy (exact strings, mirrored in store/webhooks.go):
+#   employee.created | employee.updated | employee.deactivated
+#   clock_in.created
+#   timesheet.submitted | timesheet.approved | timesheet.reopened
+#   leave.requested | leave.approved | leave.rejected | leave.balance_changed
+#   api_token.created | api_token.revoked
+#   webhook.test   (synthetic, from POST /webhooks/{id}/test)
+# A subscription may also list "*" to receive every event type.
+
+paths:
+  /api/v1/organizations/{orgId}/webhooks:
+    post:
+      summary: Create a webhook subscription
+      description: |
+        Registers an outbound webhook for the organization. The signing
+        secret is generated when omitted and is revealed exactly once in
+        this response — it cannot be retrieved again (rotate via PATCH).
+        Events fan out only to active subscriptions whose `events` include
+        the event type or `*`.
+      operationId: createWebhookSubscription
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebhookSubscriptionRequest'
+      responses:
+        '201':
+          description: Subscription created; secret shown once
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookSubscription'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    get:
+      summary: List webhook subscriptions
+      description: |
+        Cursor-paginated subscriptions for the organization, ordered by
+        (created_at, id). Secrets are never included.
+      operationId: listWebhookSubscriptions
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Subscription page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookSubscriptionPage'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/organizations/{orgId}/webhooks/{webhookId}:
+    get:
+      summary: Get a webhook subscription
+      description: The secret is never included in the response.
+      operationId: getWebhookSubscription
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: webhookId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The subscription
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookSubscription'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      summary: Update a webhook subscription
+      description: |
+        Applies the provided fields; omitted fields are unchanged. Passing a
+        new `secret` rotates it and echoes the new value once in the
+        response. Set `active: false` to pause deliveries without deleting
+        the subscription (pending messages resume on reactivation).
+      operationId: updateWebhookSubscription
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: webhookId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebhookSubscriptionPatch'
+      responses:
+        '200':
+          description: Updated subscription
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookSubscription'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      summary: Delete a webhook subscription
+      description: |
+        Removes the subscription. Pending outbox messages for it are
+        dropped; sent/dead history goes with it.
+      operationId: deleteWebhookSubscription
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: webhookId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Deleted
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/organizations/{orgId}/webhooks/{webhookId}/test:
+    post:
+      summary: Send a test webhook
+      description: |
+        The Jibble-style TestWebhook: enqueues a `webhook.test` event for
+        exactly this subscription (bypassing its event filter) through the
+        normal outbox → dispatcher pipeline. The response carries the
+        outbox message id for correlation. 400 when the subscription is
+        inactive.
+      operationId: testWebhookSubscription
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: webhookId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '202':
+          description: Test event enqueued
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [message_id]
+                properties:
+                  message_id:
+                    type: string
+                    description: Outbox message id; matches the delivered envelope's id
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+components:
+  schemas:
+    WebhookSubscription:
+      type: object
+      required: [id, organization_id, url, events, active, created_at]
+      properties:
+        id: {type: string}
+        organization_id: {type: string}
+        url: {type: string, format: uri, example: 'https://example.com/hris-hooks'}
+        secret:
+          type: string
+          description: |
+            Signing secret. Present ONLY in the create response (and echoed
+            on PATCH when rotated) — shown exactly once, never retrievable
+            again.
+        events:
+          type: array
+          items: {type: string}
+          example: ['employee.created', 'leave.requested']
+          description: Event types to receive; "*" subscribes to all types
+        active: {type: boolean}
+        created_at: {type: string, format: date-time}
+
+    WebhookSubscriptionRequest:
+      type: object
+      required: [url, events]
+      properties:
+        url:
+          type: string
+          format: uri
+          description: Absolute http(s) URL receiving the POSTed envelopes
+        secret:
+          type: string
+          description: |
+            Signing secret. When omitted the server generates one and reveals
+            it once in the response. Prefer a long random value of your own.
+        events:
+          type: array
+          minItems: 1
+          items: {type: string}
+          example: ['employee.created', '*']
+        active:
+          type: boolean
+          default: true
+
+    WebhookSubscriptionPatch:
+      type: object
+      properties:
+        url: {type: string, format: uri}
+        secret:
+          type: string
+          description: Rotates the signing secret; the new value is echoed once
+        events:
+          type: array
+          minItems: 1
+          items: {type: string}
+        active: {type: boolean}
+
+    WebhookSubscriptionPage:
+      type: object
+      required: [data, next_cursor, has_more]
+      properties:
+        data:
+          type: array
+          items: {$ref: '#/components/schemas/WebhookSubscription'}
+        next_cursor: {type: string}
+        has_more: {type: boolean}
+
+    WebhookEnvelope:
+      type: object
+      required: [id, type, time, data]
+      properties:
+        id:
+          type: string
+          description: |
+            Unique message id. Delivery is at-least-once — consumers MUST
+            dedupe on this value.
+        type:
+          type: string
+          example: employee.created
+          description: One of the event taxonomy strings
+        time:
+          type: string
+          format: date-time
+          description: Event time (enqueue time), stable across retries
+        data:
+          description: The event payload (the resource that changed)

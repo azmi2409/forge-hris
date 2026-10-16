@@ -268,3 +268,55 @@ func TestBootstrapValidation(t *testing.T) {
 		t.Fatalf("duplicate slug: want 409, got %d: %s", rr.Code, rr.Body.String())
 	}
 }
+
+// TestEmployeesWriteScope: the employees:write scope grants least-privilege
+// employee provisioning on REST, SCIM, and the MCP tool gate — without
+// minting an all-scopes (admin-equivalent) service account.
+func TestEmployeesWriteScope(t *testing.T) {
+	srv, st := newTestServer(t)
+	a := bootstrap(t, srv, "empwrite")
+	orgID := a.Organization.ID
+	empPath := "/api/v1/organizations/" + orgID + "/employees"
+
+	newHire := func(tag string) map[string]any {
+		return map[string]any{
+			"first_name": "New",
+			"last_name":  "Hire",
+			"email":      "hire-" + tag + "@example.test",
+		}
+	}
+
+	// Least-privilege service account: read + write, nothing else.
+	mintToken(t, st, orgID, "service_account", "provisioner", "tok-provisioner", nil,
+		[]string{store.ScopeEmployeesRead, store.ScopeEmployeesWrite})
+	rr := doReq(t, srv, http.MethodPost, empPath, "tok-provisioner", newHire("a"), nil)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("REST create with employees:write: want 201, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// Read-only service account still cannot create.
+	mintToken(t, st, orgID, "service_account", "reader", "tok-reader", nil,
+		[]string{store.ScopeEmployeesRead})
+	rr = doReq(t, srv, http.MethodPost, empPath, "tok-reader", newHire("b"), nil)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("REST create with employees:read only: want 403, got %d", rr.Code)
+	}
+
+	// SCIM: write-scoped token provisions; read-only is denied.
+	code, _ := scimCreateUser(t, srv, "tok-provisioner", "scim-w@example.test", "entra-w", nil)
+	if code != http.StatusCreated {
+		t.Fatalf("SCIM create with employees:write: want 201, got %d", code)
+	}
+	code, _ = scimCreateUser(t, srv, "tok-reader", "scim-r@example.test", "entra-r", nil)
+	if code != http.StatusForbidden {
+		t.Fatalf("SCIM create with employees:read only: want 403, got %d", code)
+	}
+
+	// Unknown scope is still rejected at issuance.
+	if store.ValidScope("employees:delete") {
+		t.Fatalf("employees:delete must not be a registered scope")
+	}
+	if !store.ValidScope(store.ScopeEmployeesWrite) {
+		t.Fatalf("employees:write must be registered in AllScopes")
+	}
+}

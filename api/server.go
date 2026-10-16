@@ -136,6 +136,8 @@ func (s *Server) routes() {
 
 	s.timeRoutes()
 	s.leaveRoutes()
+	s.webhookRoutes()
+	s.scimRoutes()
 }
 
 // --- middleware ---

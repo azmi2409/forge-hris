@@ -243,7 +243,13 @@ func (s *Server) clockOp(w http.ResponseWriter, r *http.Request, ai *AuthInfo,
 }
 
 func (s *Server) clockIn(w http.ResponseWriter, r *http.Request, ai *AuthInfo) (auditData, bool) {
-	return s.clockOp(w, r, ai, s.store.ClockIn)
+	ad, ok := s.clockOp(w, r, ai, s.store.ClockIn)
+	if ok {
+		if entry, isEntry := ad.After.(store.TimeEntry); isEntry {
+			s.emitWebhook(r.Context(), entry.OrganizationID, store.WebhookEventClockInCreated, entry)
+		}
+	}
+	return ad, ok
 }
 
 func (s *Server) clockOut(w http.ResponseWriter, r *http.Request, ai *AuthInfo) (auditData, bool) {
@@ -1162,9 +1168,12 @@ func (s *Server) handleGetPayPeriod(w http.ResponseWriter, r *http.Request) {
 }
 
 // payPeriodTransition is the shared body of the four transition endpoints.
+// eventType, when non-empty, is the webhook event emitted on success
+// (timesheet.submitted/approved/reopened; rejection has no webhook event).
 func (s *Server) payPeriodTransition(w http.ResponseWriter, r *http.Request, ai *AuthInfo,
 	minRole store.Role,
 	op func(ctx context.Context, orgID, id string, version int64) (store.PayPeriod, error),
+	eventType string,
 ) (auditData, bool) {
 	var zero auditData
 	orgID, ok := checkOrg(w, r, ai)
@@ -1192,23 +1201,26 @@ func (s *Server) payPeriodTransition(w http.ResponseWriter, r *http.Request, ai 
 		return zero, false
 	}
 	writeJSON(w, http.StatusOK, updated)
+	if eventType != "" {
+		s.emitWebhook(r.Context(), orgID, eventType, updated)
+	}
 	return auditData{ResourceID: updated.ID, Before: before, After: updated}, true
 }
 
 func (s *Server) submitPayPeriod(w http.ResponseWriter, r *http.Request, ai *AuthInfo) (auditData, bool) {
-	return s.payPeriodTransition(w, r, ai, store.RoleManager, s.store.SubmitPayPeriod)
+	return s.payPeriodTransition(w, r, ai, store.RoleManager, s.store.SubmitPayPeriod, store.WebhookEventTimesheetSubmitted)
 }
 
 func (s *Server) approvePayPeriod(w http.ResponseWriter, r *http.Request, ai *AuthInfo) (auditData, bool) {
-	return s.payPeriodTransition(w, r, ai, store.RoleManager, s.store.ApprovePayPeriod)
+	return s.payPeriodTransition(w, r, ai, store.RoleManager, s.store.ApprovePayPeriod, store.WebhookEventTimesheetApproved)
 }
 
 func (s *Server) rejectPayPeriod(w http.ResponseWriter, r *http.Request, ai *AuthInfo) (auditData, bool) {
-	return s.payPeriodTransition(w, r, ai, store.RoleManager, s.store.RejectPayPeriod)
+	return s.payPeriodTransition(w, r, ai, store.RoleManager, s.store.RejectPayPeriod, "")
 }
 
 func (s *Server) reopenPayPeriod(w http.ResponseWriter, r *http.Request, ai *AuthInfo) (auditData, bool) {
-	return s.payPeriodTransition(w, r, ai, store.RoleAdmin, s.store.ReopenPayPeriod)
+	return s.payPeriodTransition(w, r, ai, store.RoleAdmin, s.store.ReopenPayPeriod, store.WebhookEventTimesheetReopened)
 }
 
 // --- schedules ---

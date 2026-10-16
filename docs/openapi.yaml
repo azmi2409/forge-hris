@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
-  title: forge-hris API — components 1–3 (identity, tenancy, audit, time tracking, leave)
-  version: 1.1.0
+  title: forge-hris API — components 1–4 (identity, tenancy, audit, time tracking, leave, agent surface)
+  version: 1.2.0
   description: |
     Core platform API for forge-hris: organizations, groups, employees, RBAC
     roles, credentials (PATs + service accounts), and the hash-chained audit log.
@@ -2456,6 +2456,673 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
 
 
+  /api/v1/organizations/{orgId}/webhooks:
+    post:
+      summary: Create a webhook subscription
+      description: |
+        Registers an outbound webhook for the organization. The signing
+        secret is generated when omitted and is revealed exactly once in
+        this response — it cannot be retrieved again (rotate via PATCH).
+        Events fan out only to active subscriptions whose `events` include
+        the event type or `*`.
+      operationId: createWebhookSubscription
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebhookSubscriptionRequest'
+      responses:
+        '201':
+          description: Subscription created; secret shown once
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookSubscription'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    get:
+      summary: List webhook subscriptions
+      description: |
+        Cursor-paginated subscriptions for the organization, ordered by
+        (created_at, id). Secrets are never included.
+      operationId: listWebhookSubscriptions
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Subscription page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookSubscriptionPage'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/organizations/{orgId}/webhooks/{webhookId}:
+    get:
+      summary: Get a webhook subscription
+      description: The secret is never included in the response.
+      operationId: getWebhookSubscription
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: webhookId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The subscription
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookSubscription'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      summary: Update a webhook subscription
+      description: |
+        Applies the provided fields; omitted fields are unchanged. Passing a
+        new `secret` rotates it and echoes the new value once in the
+        response. Set `active: false` to pause deliveries without deleting
+        the subscription (pending messages resume on reactivation).
+      operationId: updateWebhookSubscription
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: webhookId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebhookSubscriptionPatch'
+      responses:
+        '200':
+          description: Updated subscription
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookSubscription'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      summary: Delete a webhook subscription
+      description: |
+        Removes the subscription. Pending outbox messages for it are
+        dropped; sent/dead history goes with it.
+      operationId: deleteWebhookSubscription
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: webhookId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Deleted
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/organizations/{orgId}/webhooks/{webhookId}/test:
+    post:
+      summary: Send a test webhook
+      description: |
+        The Jibble-style TestWebhook: enqueues a `webhook.test` event for
+        exactly this subscription (bypassing its event filter) through the
+        normal outbox → dispatcher pipeline. The response carries the
+        outbox message id for correlation. 400 when the subscription is
+        inactive.
+      operationId: testWebhookSubscription
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: webhookId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '202':
+          description: Test event enqueued
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [message_id]
+                properties:
+                  message_id:
+                    type: string
+                    description: Outbox message id; matches the delivered envelope's id
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /scim/v2/Users:
+    get:
+      summary: List users
+      description: |
+        SCIM ListResponse of provisioned users (employees). Supports
+        `filter=userName eq "a@b.c"`, `filter=externalId eq "..."`,
+        `startIndex`, and `count`. Requires a service account with the
+        employees:read scope.
+      operationId: scimListUsers
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: filter
+          in: query
+          schema: { type: string }
+          description: 'Minimal eq dialect: userName eq "..." or externalId eq "..."'
+        - name: startIndex
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: count
+          in: query
+          schema: { type: integer, minimum: 0, maximum: 1000, default: 100 }
+      responses:
+        '200':
+          description: SCIM ListResponse
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMListResponse'
+        '400':
+          description: Bad filter or pagination (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '401':
+          description: Not a service-account credential (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '403':
+          description: Missing employees:read scope (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+    post:
+      summary: Provision a user
+      description: |
+        Creates an employee from a SCIM User. userName (an email) and
+        name.givenName are required; externalId is linked in scim_links.
+        active:false creates the employee then immediately deactivates it.
+        Requires the employees:write scope. 409 scimType
+        `uniqueness` on duplicate email or externalId.
+      operationId: scimCreateUser
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SCIMUserRequest'
+      responses:
+        '201':
+          description: Created SCIM User
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMUser'
+        '400':
+          description: Validation failure (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '401':
+          description: Not a service-account credential (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '403':
+          description: Missing employees:write scope (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '409':
+          description: Duplicate email or externalId (SCIM error body, scimType uniqueness)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+
+  /scim/v2/Users/{id}:
+    get:
+      summary: Get a user
+      operationId: scimGetUser
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: SCIM User
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMUser'
+        '401':
+          description: Not a service-account credential (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '403':
+          description: Missing employees:read scope (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '404':
+          description: Unknown user (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+    put:
+      summary: Replace a user
+      description: |
+        Full replacement of mutable fields (userName/email, name,
+        externalId, active). An absent externalId drops the link; an absent
+        active flag keeps the current status. active:false deactivates via
+        the soft-deactivate path. Requires the employees:write scope.
+      operationId: scimReplaceUser
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SCIMUserRequest'
+      responses:
+        '200':
+          description: Replaced SCIM User
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMUser'
+        '400':
+          description: Validation failure (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '401':
+          description: Not a service-account credential (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '403':
+          description: Missing employees:write scope (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '404':
+          description: Unknown user (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '409':
+          description: Duplicate email or externalId (SCIM error body, scimType uniqueness)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+    patch:
+      summary: Patch a user
+      description: |
+        RFC 7644 PATCH. Ops replace/add supported on paths active,
+        name.givenName, name.familyName, emails, externalId; op remove only
+        on externalId (unlinks). Requires the employees:write scope.
+      operationId: scimPatchUser
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SCIMPatchRequest'
+      responses:
+        '200':
+          description: Patched SCIM User
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMUser'
+        '400':
+          description: Bad op/path/value (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '401':
+          description: Not a service-account credential (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '403':
+          description: Missing employees:write scope (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '404':
+          description: Unknown user (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+    delete:
+      summary: Deprovision a user
+      description: |
+        Soft-deactivate: sets invitation status to removed (active=false
+        semantics). The record and its externalId link are kept; the IdP can
+        re-correlate on re-provisioning. Idempotent: 204 even if already
+        removed. Requires the employees:write scope.
+      operationId: scimDeleteUser
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '204':
+          description: Deactivated
+        '401':
+          description: Not a service-account credential (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '403':
+          description: Missing employees:write scope (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '404':
+          description: Unknown user (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+
+  /scim/v2/Groups:
+    get:
+      summary: List groups
+      description: |
+        SCIM ListResponse of groups. Supports `filter=displayName eq "..."`,
+        `startIndex`, and `count`. Requires a service account with the
+        employees:read scope.
+      operationId: scimListGroups
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: filter
+          in: query
+          schema: { type: string }
+          description: 'Minimal eq dialect: displayName eq "..."'
+        - name: startIndex
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: count
+          in: query
+          schema: { type: integer, minimum: 0, maximum: 1000, default: 100 }
+      responses:
+        '200':
+          description: SCIM ListResponse
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMListResponse'
+        '400':
+          description: Bad filter or pagination (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '401':
+          description: Not a service-account credential (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '403':
+          description: Missing employees:read scope (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+    post:
+      summary: Create a group
+      description: |
+        Creates a group (department/team); members[].value are employee IDs
+        assigned to the group. Group externalId is rejected (400) — there is
+        no storage for it. Requires the employees:write scope.
+      operationId: scimCreateGroup
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SCIMGroupRequest'
+      responses:
+        '201':
+          description: Created SCIM Group
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMGroup'
+        '400':
+          description: Validation failure, unknown member, or group externalId (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '401':
+          description: Not a service-account credential (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '403':
+          description: Missing employees:write scope (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+
+  /scim/v2/Groups/{id}:
+    get:
+      summary: Get a group
+      operationId: scimGetGroup
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: SCIM Group
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMGroup'
+        '401':
+          description: Not a service-account credential (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '403':
+          description: Missing employees:read scope (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '404':
+          description: Unknown group (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+    patch:
+      summary: Patch a group
+      description: |
+        Ops add/remove on path members (value: [{value: employeeId}]);
+        op replace on path displayName. Requires the employees:write scope.
+      operationId: scimPatchGroup
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SCIMPatchRequest'
+      responses:
+        '200':
+          description: Patched SCIM Group
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMGroup'
+        '400':
+          description: Bad op/path/value or unknown member (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '401':
+          description: Not a service-account credential (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '403':
+          description: Missing employees:write scope (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '404':
+          description: Unknown group (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+    delete:
+      summary: Delete a group
+      description: |
+        Deletes an empty group (204). 409 when members are still assigned —
+        unassign them first. Requires the employees:write scope.
+      operationId: scimDeleteGroup
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '204':
+          description: Deleted
+        '401':
+          description: Not a service-account credential (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '403':
+          description: Missing employees:write scope (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '404':
+          description: Unknown group (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '409':
+          description: Group still has members (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+
 components:
   securitySchemes:
     bearerAuth:
@@ -3681,3 +4348,236 @@ components:
               start_date: { type: string, format: date }
               end_date: { type: string, format: date }
               is_unpaid: { type: boolean }
+    WebhookSubscription:
+      type: object
+      required: [id, organization_id, url, events, active, created_at]
+      properties:
+        id: {type: string}
+        organization_id: {type: string}
+        url: {type: string, format: uri, example: 'https://example.com/hris-hooks'}
+        secret:
+          type: string
+          description: |
+            Signing secret. Present ONLY in the create response (and echoed
+            on PATCH when rotated) — shown exactly once, never retrievable
+            again.
+        events:
+          type: array
+          items: {type: string}
+          example: ['employee.created', 'leave.requested']
+          description: Event types to receive; "*" subscribes to all types
+        active: {type: boolean}
+        created_at: {type: string, format: date-time}
+
+    WebhookSubscriptionRequest:
+      type: object
+      required: [url, events]
+      properties:
+        url:
+          type: string
+          format: uri
+          description: Absolute http(s) URL receiving the POSTed envelopes
+        secret:
+          type: string
+          description: |
+            Signing secret. When omitted the server generates one and reveals
+            it once in the response. Prefer a long random value of your own.
+        events:
+          type: array
+          minItems: 1
+          items: {type: string}
+          example: ['employee.created', '*']
+        active:
+          type: boolean
+          default: true
+
+    WebhookSubscriptionPatch:
+      type: object
+      properties:
+        url: {type: string, format: uri}
+        secret:
+          type: string
+          description: Rotates the signing secret; the new value is echoed once
+        events:
+          type: array
+          minItems: 1
+          items: {type: string}
+        active: {type: boolean}
+
+    WebhookSubscriptionPage:
+      type: object
+      required: [data, next_cursor, has_more]
+      properties:
+        data:
+          type: array
+          items: {$ref: '#/components/schemas/WebhookSubscription'}
+        next_cursor: {type: string}
+        has_more: {type: boolean}
+
+    WebhookEnvelope:
+      type: object
+      required: [id, type, time, data]
+      properties:
+        id:
+          type: string
+          description: |
+            Unique message id. Delivery is at-least-once — consumers MUST
+            dedupe on this value.
+        type:
+          type: string
+          example: employee.created
+          description: One of the event taxonomy strings
+        time:
+          type: string
+          format: date-time
+          description: Event time (enqueue time), stable across retries
+        data:
+          description: The event payload (the resource that changed)
+    SCIMUser:
+      type: object
+      required: [schemas, id, userName, name, emails, active, meta]
+      properties:
+        schemas:
+          type: array
+          items: { type: string }
+          example: ["urn:ietf:params:scim:schemas:core:2.0:User"]
+        id: { type: string }
+        userName:
+          type: string
+          description: The employee email (unique per organization).
+        externalId:
+          type: string
+          description: IdP correlation key, from the scim_links table.
+        name:
+          type: object
+          properties:
+            givenName: { type: string }
+            familyName: { type: string }
+        emails:
+          type: array
+          items:
+            type: object
+            properties:
+              value: { type: string }
+              primary: { type: boolean }
+              type: { type: string }
+        active:
+          type: boolean
+          description: false = invitation status removed (soft-deactivated).
+        meta:
+          $ref: '#/components/schemas/SCIMMeta'
+    SCIMUserRequest:
+      type: object
+      required: [userName]
+      properties:
+        schemas:
+          type: array
+          items: { type: string }
+        userName: { type: string }
+        externalId: { type: string }
+        name:
+          type: object
+          properties:
+            givenName: { type: string }
+            familyName: { type: string }
+        emails:
+          type: array
+          items:
+            type: object
+            properties:
+              value: { type: string }
+              primary: { type: boolean }
+              type: { type: string }
+        active:
+          type: boolean
+          default: true
+          description: false = create then immediately deactivate.
+    SCIMGroup:
+      type: object
+      required: [schemas, id, displayName, members, meta]
+      properties:
+        schemas:
+          type: array
+          items: { type: string }
+          example: ["urn:ietf:params:scim:schemas:core:2.0:Group"]
+        id: { type: string }
+        displayName: { type: string }
+        members:
+          type: array
+          items:
+            type: object
+            required: [value]
+            properties:
+              value: { type: string, description: Employee (SCIM user) ID. }
+              $ref: { type: string }
+              display: { type: string }
+        meta:
+          $ref: '#/components/schemas/SCIMMeta'
+    SCIMGroupRequest:
+      type: object
+      required: [displayName]
+      properties:
+        schemas:
+          type: array
+          items: { type: string }
+        displayName: { type: string }
+        members:
+          type: array
+          items:
+            type: object
+            required: [value]
+            properties:
+              value: { type: string }
+    SCIMPatchRequest:
+      type: object
+      properties:
+        schemas:
+          type: array
+          items: { type: string }
+          example: ["urn:ietf:params:scim:api:messages:2.0:PatchOp"]
+        Operations:
+          type: array
+          items:
+            type: object
+            required: [op]
+            properties:
+              op:
+                type: string
+                enum: [add, remove, replace]
+              path: { type: string }
+              value: { description: Shape depends on path; see operation docs. }
+    SCIMListResponse:
+      type: object
+      required: [schemas, totalResults, startIndex, itemsPerPage, Resources]
+      properties:
+        schemas:
+          type: array
+          items: { type: string }
+          example: ["urn:ietf:params:scim:api:messages:2.0:ListResponse"]
+        totalResults: { type: integer }
+        startIndex: { type: integer }
+        itemsPerPage: { type: integer }
+        Resources:
+          type: array
+          items: { type: object }
+    SCIMMeta:
+      type: object
+      properties:
+        resourceType: { type: string, enum: [User, Group] }
+        created: { type: string, format: date-time }
+        lastModified: { type: string, format: date-time }
+    SCIMError:
+      type: object
+      required: [schemas, status, detail]
+      properties:
+        schemas:
+          type: array
+          items: { type: string }
+          example: ["urn:ietf:params:scim:api:messages:2.0:Error"]
+        status:
+          type: string
+          description: HTTP status mirrored as a string, per RFC 7644.
+        scimType:
+          type: string
+          description: e.g. invalidValue, invalidFilter, invalidPath, uniqueness, invalidSyntax.
+        detail: { type: string }

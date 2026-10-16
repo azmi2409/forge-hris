@@ -39,6 +39,9 @@ type MemoryStore struct {
 	leaveApprovals   map[string]TimeOffApproval // orgID + "\x00" + id
 	holidayCalendars map[string]HolidayCalendar // orgID + "\x00" + id
 	holidays         map[string]Holiday         // orgID + "\x00" + id
+	// --- webhooks (component 4) ---
+	webhookSubs   map[string]WebhookSubscription // orgID + "\x00" + id
+	webhookOutbox map[string]WebhookOutbox       // message id
 }
 
 // NewMemoryStore returns an empty MemoryStore.
@@ -62,6 +65,9 @@ func NewMemoryStore() *MemoryStore {
 		leaveApprovals:   make(map[string]TimeOffApproval),
 		holidayCalendars: make(map[string]HolidayCalendar),
 		holidays:         make(map[string]Holiday),
+		// --- webhooks (component 4) ---
+		webhookSubs:   make(map[string]WebhookSubscription),
+		webhookOutbox: make(map[string]WebhookOutbox),
 	}
 }
 

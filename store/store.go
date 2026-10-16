@@ -162,6 +162,7 @@ type AuditFilter struct {
 type Store interface {
 	TimeTrackingStore
 	LeaveStore
+	WebhookStore
 
 	// Organizations.
 	// CreateOrganization stores a new organization. An empty ID is

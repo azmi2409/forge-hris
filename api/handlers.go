@@ -45,6 +45,19 @@ func requireScopeOr(w http.ResponseWriter, r *http.Request, ai *AuthInfo, scope 
 	return false
 }
 
+// requireRoleOrScope writes 403 unless the caller meets the minimum role or
+// holds the scope. Used where a least-privilege service account should be
+// able to do what an admin PAT can (e.g. employees:write for SCIM-style
+// provisioning) without minting an all-scopes token.
+func requireRoleOrScope(w http.ResponseWriter, r *http.Request, ai *AuthInfo, min store.Role, scope, what string) bool {
+	if requireRole(min, ai) || requireScope(scope, ai) {
+		return true
+	}
+	writeError(w, r, http.StatusForbidden, "FORBIDDEN",
+		"requires "+string(min)+" role or higher, or scope "+scope+what)
+	return false
+}
+
 // employeeNumberOrGenerate returns the requested employee number, or a
 // generated one when the caller didn't supply it. The store requires
 // employee_number to be present and unique per organization; callers with
@@ -389,7 +402,7 @@ func (s *Server) createEmployee(w http.ResponseWriter, r *http.Request, ai *Auth
 	if !ok {
 		return zero, false
 	}
-	if !requireRoleOr(w, r, ai, store.RoleAdmin, " to create employees") {
+	if !requireRoleOrScope(w, r, ai, store.RoleAdmin, store.ScopeEmployeesWrite, " to create employees") {
 		return zero, false
 	}
 	var req createEmployeeRequest
@@ -446,6 +459,7 @@ func (s *Server) createEmployee(w http.ResponseWriter, r *http.Request, ai *Auth
 		}
 	}
 	writeJSON(w, http.StatusCreated, created)
+	s.emitWebhook(r.Context(), orgID, store.WebhookEventEmployeeCreated, created)
 	return auditData{ResourceID: created.ID, After: created}, true
 }
 
@@ -540,7 +554,7 @@ func (s *Server) patchEmployee(w http.ResponseWriter, r *http.Request, ai *AuthI
 	if !ok {
 		return zero, false
 	}
-	if !requireRoleOr(w, r, ai, store.RoleAdmin, " to update employees") {
+	if !requireRoleOrScope(w, r, ai, store.RoleAdmin, store.ScopeEmployeesWrite, " to update employees") {
 		return zero, false
 	}
 	var req patchEmployeeRequest
@@ -604,6 +618,7 @@ func (s *Server) patchEmployee(w http.ResponseWriter, r *http.Request, ai *AuthI
 		return zero, false
 	}
 	writeJSON(w, http.StatusOK, updated)
+	s.emitWebhook(r.Context(), orgID, store.WebhookEventEmployeeUpdated, updated)
 	return auditData{ResourceID: updated.ID, Before: before, After: updated}, true
 }
 
@@ -617,7 +632,7 @@ func (s *Server) deactivateEmployee(w http.ResponseWriter, r *http.Request, ai *
 	if !ok {
 		return zero, false
 	}
-	if !requireRoleOr(w, r, ai, store.RoleAdmin, " to deactivate employees") {
+	if !requireRoleOrScope(w, r, ai, store.RoleAdmin, store.ScopeEmployeesWrite, " to deactivate employees") {
 		return zero, false
 	}
 	var req deactivateEmployeeRequest
@@ -638,6 +653,7 @@ func (s *Server) deactivateEmployee(w http.ResponseWriter, r *http.Request, ai *
 		return zero, false
 	}
 	writeJSON(w, http.StatusOK, updated)
+	s.emitWebhook(r.Context(), orgID, store.WebhookEventEmployeeDeactivated, updated)
 	return auditData{ResourceID: employeeID, Before: before, After: updated}, true
 }
 
@@ -876,6 +892,9 @@ func (s *Server) issueCredential(w http.ResponseWriter, r *http.Request, ai *Aut
 		// Shown once. It cannot be retrieved again; only the hash is stored.
 		"token": plaintext,
 	})
+	// The public credential shape carries no token hash; the raw store
+	// value must never leave the process in an event payload.
+	s.emitWebhook(r.Context(), orgID, store.WebhookEventAPITokenCreated, toCredentialResponse(cred))
 	return auditData{ResourceID: cred.ID, After: toCredentialResponse(cred)}, true
 }
 
@@ -935,6 +954,8 @@ func (s *Server) revokeCredential(w http.ResponseWriter, r *http.Request, ai *Au
 		return zero, false
 	}
 	w.WriteHeader(http.StatusNoContent)
+	s.emitWebhook(r.Context(), orgID, store.WebhookEventAPITokenRevoked,
+		map[string]any{"id": credentialID, "organization_id": orgID})
 	return auditData{ResourceID: credentialID, Before: toCredentialResponse(target)}, true
 }
 

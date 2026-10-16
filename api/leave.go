@@ -384,6 +384,10 @@ func (s *Server) recalculateLeaveBalance(w http.ResponseWriter, r *http.Request,
 		return zero, false
 	}
 	writeJSON(w, http.StatusOK, bal)
+	// Emit only when the ledger actually moved; no-op recalcs stay quiet.
+	if before.ID == "" || before.Balance != bal.Balance {
+		s.emitWebhook(r.Context(), orgID, store.WebhookEventLeaveBalanceChanged, bal)
+	}
 	return auditData{ResourceID: bal.ID, Before: before, After: bal}, true
 }
 
@@ -458,6 +462,7 @@ func (s *Server) createLeaveRequest(w http.ResponseWriter, r *http.Request, ai *
 		return zero, false
 	}
 	writeJSON(w, http.StatusCreated, created)
+	s.emitWebhook(r.Context(), orgID, store.WebhookEventLeaveRequested, created)
 	return auditData{ResourceID: created.ID, After: created}, true
 }
 
@@ -668,6 +673,13 @@ func (s *Server) decideLeaveRequest(w http.ResponseWriter, r *http.Request, ai *
 		"request":   updated,
 		"approvals": steps,
 	})
+	// Multi-step chains can end still-pending; only the terminal transition
+	// produces an event.
+	if updated.Status == store.TimeOffApproved && before.Status != store.TimeOffApproved {
+		s.emitWebhook(r.Context(), orgID, store.WebhookEventLeaveApproved, updated)
+	} else if updated.Status == store.TimeOffRejected && before.Status != store.TimeOffRejected {
+		s.emitWebhook(r.Context(), orgID, store.WebhookEventLeaveRejected, updated)
+	}
 	return auditData{ResourceID: updated.ID, Before: before, After: updated}, true
 }
 
@@ -774,6 +786,9 @@ func (s *Server) bulkApproveLeaveRequests(w http.ResponseWriter, r *http.Request
 		return zero, false
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"approved": approved})
+	for _, a := range approved {
+		s.emitWebhook(ctx, orgID, store.WebhookEventLeaveApproved, a)
+	}
 	ids := make([]string, 0, len(approved))
 	for _, a := range approved {
 		ids = append(ids, a.ID)

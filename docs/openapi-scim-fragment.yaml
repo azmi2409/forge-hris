@@ -1,0 +1,696 @@
+# OpenAPI 3.1 fragment — forge-hris component 4 (Worker C): SCIM 2.0.
+#
+# MERGE NOTES FOR THE COORDINATOR (do not ship this file standalone):
+# 1. Append every entry under `paths:` into the main openapi.yaml `paths:`.
+#    Unlike /api/v1, SCIM paths carry NO {orgId} segment: the tenant comes
+#    from the service-account credential (one token per company).
+# 2. Append every entry under `components.schemas:` into the main
+#    `components.schemas:`. The `Error`, `bearerAuth` refs already exist in
+#    the main file — do not duplicate.
+# 3. Security: every SCIM operation uses the existing `bearerAuth` scheme,
+#    but with SCIM-specific rules enforced in api/scim.go (NOT the /api/v1
+#    rules): only service_account credentials are accepted (PATs -> 401),
+#    reads need scope employees:read, mutations need scope employees:write.
+#    See "RBAC summary" below.
+# 4. Errors on SCIM paths use the SCIM error body (schemas =
+#    urn:ietf:params:scim:api:messages:2.0:Error, string "status" field), NOT
+#    the flat /api/v1 envelope. Documented per-operation below.
+#
+# RBAC summary (mirrors api/scim.go):
+# - Reads  (GET):  service account AND scope employees:read.
+# - Writes (POST/PUT/PATCH/DELETE): service account AND scope
+#   employees:write (least-privilege; no all-scopes token required).
+# - PATs are rejected with 401 on every SCIM path (SCIM is
+#   machine-to-machine); a missing/invalid token is 401 from the main auth
+#   middleware with the /api/v1 envelope, all other SCIM auth failures use
+#   the SCIM error body.
+#
+# Provisioning a credential (via the EXISTING credential endpoints):
+#   POST /api/v1/organizations/{orgId}/credentials   (as an admin PAT)
+#   {"kind":"service_account","name":"entra-scim","scopes":["employees:read","employees:write"]}
+# The plaintext token is shown once; configure it as the bearer token in the
+# IdP's SCIM provisioning settings against base URL <host>/scim/v2.
+#
+# Mapping notes (IdP admins read this):
+# - SCIM User <-> employee: userName is the employee email (unique per org);
+#   active=false means invitation status removed (soft-deactivate; the record
+#   and its externalId link are kept, so re-provisioning re-correlates).
+#   DELETE /Users/{id} is soft-deactivate (204); employees are never
+#   hard-deleted.
+# - externalId <-> scim_links table (NOT an employee column). Kept across
+#   deactivation. PUT without externalId drops the link.
+# - SCIM Group <-> group (department/team); members are employees whose
+#   group_id points at the group — the core store has no multi-group
+#   membership, so one employee belongs to at own group. DELETE on a group
+#   with members assigned is 409; unassign members first.
+# - Group externalId is rejected (400): there is no storage for it.
+# - List pagination is startIndex (1-based) + count per RFC 7644; totalResults
+#   requires a full scan of the org's employees/groups (provisioning syncs
+#   are infrequent; acceptable).
+# - PATCH supports ops replace/add on paths active, name.givenName,
+#   name.familyName, emails, externalId (Users) and add/remove on members
+#   plus replace on displayName (Groups).
+
+paths:
+  /scim/v2/Users:
+    get:
+      summary: List users
+      description: |
+        SCIM ListResponse of provisioned users (employees). Supports
+        `filter=userName eq "a@b.c"`, `filter=externalId eq "..."`,
+        `startIndex`, and `count`. Requires a service account with the
+        employees:read scope.
+      operationId: scimListUsers
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: filter
+          in: query
+          schema: { type: string }
+          description: 'Minimal eq dialect: userName eq "..." or externalId eq "..."'
+        - name: startIndex
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: count
+          in: query
+          schema: { type: integer, minimum: 0, maximum: 1000, default: 100 }
+      responses:
+        '200':
+          description: SCIM ListResponse
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMListResponse'
+        '400':
+          description: Bad filter or pagination (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '401':
+          description: Not a service-account credential (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '403':
+          description: Missing employees:read scope (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+    post:
+      summary: Provision a user
+      description: |
+        Creates an employee from a SCIM User. userName (an email) and
+        name.givenName are required; externalId is linked in scim_links.
+        active:false creates the employee then immediately deactivates it.
+        Requires the employees:write scope. 409 scimType
+        `uniqueness` on duplicate email or externalId.
+      operationId: scimCreateUser
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SCIMUserRequest'
+      responses:
+        '201':
+          description: Created SCIM User
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMUser'
+        '400':
+          description: Validation failure (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '401':
+          description: Not a service-account credential (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '403':
+          description: Missing employees:write scope (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '409':
+          description: Duplicate email or externalId (SCIM error body, scimType uniqueness)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+
+  /scim/v2/Users/{id}:
+    get:
+      summary: Get a user
+      operationId: scimGetUser
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: SCIM User
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMUser'
+        '401':
+          description: Not a service-account credential (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '403':
+          description: Missing employees:read scope (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '404':
+          description: Unknown user (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+    put:
+      summary: Replace a user
+      description: |
+        Full replacement of mutable fields (userName/email, name,
+        externalId, active). An absent externalId drops the link; an absent
+        active flag keeps the current status. active:false deactivates via
+        the soft-deactivate path. Requires the employees:write scope.
+      operationId: scimReplaceUser
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SCIMUserRequest'
+      responses:
+        '200':
+          description: Replaced SCIM User
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMUser'
+        '400':
+          description: Validation failure (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '401':
+          description: Not a service-account credential (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '403':
+          description: Missing employees:write scope (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '404':
+          description: Unknown user (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '409':
+          description: Duplicate email or externalId (SCIM error body, scimType uniqueness)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+    patch:
+      summary: Patch a user
+      description: |
+        RFC 7644 PATCH. Ops replace/add supported on paths active,
+        name.givenName, name.familyName, emails, externalId; op remove only
+        on externalId (unlinks). Requires the employees:write scope.
+      operationId: scimPatchUser
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SCIMPatchRequest'
+      responses:
+        '200':
+          description: Patched SCIM User
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMUser'
+        '400':
+          description: Bad op/path/value (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '401':
+          description: Not a service-account credential (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '403':
+          description: Missing employees:write scope (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '404':
+          description: Unknown user (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+    delete:
+      summary: Deprovision a user
+      description: |
+        Soft-deactivate: sets invitation status to removed (active=false
+        semantics). The record and its externalId link are kept; the IdP can
+        re-correlate on re-provisioning. Idempotent: 204 even if already
+        removed. Requires the employees:write scope.
+      operationId: scimDeleteUser
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '204':
+          description: Deactivated
+        '401':
+          description: Not a service-account credential (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '403':
+          description: Missing employees:write scope (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '404':
+          description: Unknown user (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+
+  /scim/v2/Groups:
+    get:
+      summary: List groups
+      description: |
+        SCIM ListResponse of groups. Supports `filter=displayName eq "..."`,
+        `startIndex`, and `count`. Requires a service account with the
+        employees:read scope.
+      operationId: scimListGroups
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: filter
+          in: query
+          schema: { type: string }
+          description: 'Minimal eq dialect: displayName eq "..."'
+        - name: startIndex
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: count
+          in: query
+          schema: { type: integer, minimum: 0, maximum: 1000, default: 100 }
+      responses:
+        '200':
+          description: SCIM ListResponse
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMListResponse'
+        '400':
+          description: Bad filter or pagination (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '401':
+          description: Not a service-account credential (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '403':
+          description: Missing employees:read scope (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+    post:
+      summary: Create a group
+      description: |
+        Creates a group (department/team); members[].value are employee IDs
+        assigned to the group. Group externalId is rejected (400) — there is
+        no storage for it. Requires the employees:write scope.
+      operationId: scimCreateGroup
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SCIMGroupRequest'
+      responses:
+        '201':
+          description: Created SCIM Group
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMGroup'
+        '400':
+          description: Validation failure, unknown member, or group externalId (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '401':
+          description: Not a service-account credential (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '403':
+          description: Missing employees:write scope (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+
+  /scim/v2/Groups/{id}:
+    get:
+      summary: Get a group
+      operationId: scimGetGroup
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: SCIM Group
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMGroup'
+        '401':
+          description: Not a service-account credential (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '403':
+          description: Missing employees:read scope (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '404':
+          description: Unknown group (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+    patch:
+      summary: Patch a group
+      description: |
+        Ops add/remove on path members (value: [{value: employeeId}]);
+        op replace on path displayName. Requires the employees:write scope.
+      operationId: scimPatchGroup
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SCIMPatchRequest'
+      responses:
+        '200':
+          description: Patched SCIM Group
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMGroup'
+        '400':
+          description: Bad op/path/value or unknown member (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '401':
+          description: Not a service-account credential (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '403':
+          description: Missing employees:write scope (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '404':
+          description: Unknown group (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+    delete:
+      summary: Delete a group
+      description: |
+        Deletes an empty group (204). 409 when members are still assigned —
+        unassign them first. Requires the employees:write scope.
+      operationId: scimDeleteGroup
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '204':
+          description: Deleted
+        '401':
+          description: Not a service-account credential (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '403':
+          description: Missing employees:write scope (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '404':
+          description: Unknown group (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+        '409':
+          description: Group still has members (SCIM error body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SCIMError'
+
+components:
+  schemas:
+    SCIMUser:
+      type: object
+      required: [schemas, id, userName, name, emails, active, meta]
+      properties:
+        schemas:
+          type: array
+          items: { type: string }
+          example: ["urn:ietf:params:scim:schemas:core:2.0:User"]
+        id: { type: string }
+        userName:
+          type: string
+          description: The employee email (unique per organization).
+        externalId:
+          type: string
+          description: IdP correlation key, from the scim_links table.
+        name:
+          type: object
+          properties:
+            givenName: { type: string }
+            familyName: { type: string }
+        emails:
+          type: array
+          items:
+            type: object
+            properties:
+              value: { type: string }
+              primary: { type: boolean }
+              type: { type: string }
+        active:
+          type: boolean
+          description: false = invitation status removed (soft-deactivated).
+        meta:
+          $ref: '#/components/schemas/SCIMMeta'
+    SCIMUserRequest:
+      type: object
+      required: [userName]
+      properties:
+        schemas:
+          type: array
+          items: { type: string }
+        userName: { type: string }
+        externalId: { type: string }
+        name:
+          type: object
+          properties:
+            givenName: { type: string }
+            familyName: { type: string }
+        emails:
+          type: array
+          items:
+            type: object
+            properties:
+              value: { type: string }
+              primary: { type: boolean }
+              type: { type: string }
+        active:
+          type: boolean
+          default: true
+          description: false = create then immediately deactivate.
+    SCIMGroup:
+      type: object
+      required: [schemas, id, displayName, members, meta]
+      properties:
+        schemas:
+          type: array
+          items: { type: string }
+          example: ["urn:ietf:params:scim:schemas:core:2.0:Group"]
+        id: { type: string }
+        displayName: { type: string }
+        members:
+          type: array
+          items:
+            type: object
+            required: [value]
+            properties:
+              value: { type: string, description: Employee (SCIM user) ID. }
+              $ref: { type: string }
+              display: { type: string }
+        meta:
+          $ref: '#/components/schemas/SCIMMeta'
+    SCIMGroupRequest:
+      type: object
+      required: [displayName]
+      properties:
+        schemas:
+          type: array
+          items: { type: string }
+        displayName: { type: string }
+        members:
+          type: array
+          items:
+            type: object
+            required: [value]
+            properties:
+              value: { type: string }
+    SCIMPatchRequest:
+      type: object
+      properties:
+        schemas:
+          type: array
+          items: { type: string }
+          example: ["urn:ietf:params:scim:api:messages:2.0:PatchOp"]
+        Operations:
+          type: array
+          items:
+            type: object
+            required: [op]
+            properties:
+              op:
+                type: string
+                enum: [add, remove, replace]
+              path: { type: string }
+              value: { description: Shape depends on path; see operation docs. }
+    SCIMListResponse:
+      type: object
+      required: [schemas, totalResults, startIndex, itemsPerPage, Resources]
+      properties:
+        schemas:
+          type: array
+          items: { type: string }
+          example: ["urn:ietf:params:scim:api:messages:2.0:ListResponse"]
+        totalResults: { type: integer }
+        startIndex: { type: integer }
+        itemsPerPage: { type: integer }
+        Resources:
+          type: array
+          items: { type: object }
+    SCIMMeta:
+      type: object
+      properties:
+        resourceType: { type: string, enum: [User, Group] }
+        created: { type: string, format: date-time }
+        lastModified: { type: string, format: date-time }
+    SCIMError:
+      type: object
+      required: [schemas, status, detail]
+      properties:
+        schemas:
+          type: array
+          items: { type: string }
+          example: ["urn:ietf:params:scim:api:messages:2.0:Error"]
+        status:
+          type: string
+          description: HTTP status mirrored as a string, per RFC 7644.
+        scimType:
+          type: string
+          description: e.g. invalidValue, invalidFilter, invalidPath, uniqueness, invalidSyntax.
+        detail: { type: string }

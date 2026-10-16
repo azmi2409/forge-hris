@@ -100,6 +100,34 @@ go run ./cmd/forge-hris-api
 Or everything with one command: `docker compose up -d` (see [DEPLOY.md](DEPLOY.md)).
 Full API contract: [`docs/openapi.yaml`](docs/openapi.yaml).
 
+## Agent surface (component 4)
+
+The MCP server exposes 29 `hris.*` tools over stdio or HTTP — same store
+calls as the REST API, same Bearer <redacted> model, with server-side approval
+gates: `confirm`-tier tools (creates, deactivations, approvals) return
+`approval_required` + a resume token instead of executing; `never`-tier
+(`hris.approve_leave_bulk`) additionally requires `confirmed:true`.
+Every tool call is audited as `actor_type=agent`, and tool mutations emit
+webhooks like their REST counterparts. Full catalog: [`docs/mcp.md`](docs/mcp.md).
+
+```bash
+# stdio (Claude Desktop / Claude Code) — token via env
+export FORGE_HRIS_MCP_TOKEN="$PAT"
+go run ./cmd/forge-hris-mcp --stdio
+
+# HTTP: POST JSON-RPC to /mcp, SSE stream on GET /mcp
+go run ./cmd/forge-hris-mcp --addr :8081
+curl -s -X POST localhost:8081/mcp -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $PAT" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | head -c 300
+```
+
+Webhooks: `POST /api/v1/organizations/$ORG/webhooks` (admin) with
+`{"url":"https://example.com/hooks","events":["leave.requested"]}` —
+deliveries are HMAC-SHA256 signed (`X-Hub-Signature-256`), at-least-once.
+SCIM 2.0 for Okta/Entra: provision a service-account credential, then point
+the IdP at `/scim/v2` (see `docs/openapi.yaml`).
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

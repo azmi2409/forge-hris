@@ -134,6 +134,7 @@ const (
 	ScopePayrollPreview = "payroll:preview"
 	ScopePayrollSubmit  = "payroll:submit"
 	ScopeEmployeesRead  = "employees:read"
+	ScopeEmployeesWrite = "employees:write"
 	ScopeAuditRead      = "audit:read"
 )
 
@@ -143,7 +144,7 @@ func AllScopes() []string {
 		ScopeTimeRead, ScopeTimeWrite,
 		ScopeLeaveRead, ScopeLeaveWrite, ScopeLeaveApprove,
 		ScopePayrollRead, ScopePayrollPreview, ScopePayrollSubmit,
-		ScopeEmployeesRead, ScopeAuditRead,
+		ScopeEmployeesRead, ScopeEmployeesWrite, ScopeAuditRead,
 	}
 }
 

@@ -61,6 +61,9 @@ func run(logger *slog.Logger) error {
 	}
 
 	srv := api.NewServer(st, logger)
+	// The webhook outbox dispatcher is in-process: it drains pending
+	// deliveries every 5s until the process shuts down.
+	api.StartWebhookDispatcher(ctx, st, logger)
 	logger.Info("listening", "port", port)
 	return srv.Serve(ctx, ":"+port)
 }
