@@ -227,6 +227,7 @@ body {
 /* Steps */
 .steps {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 1.5rem;
   margin-top: 2rem;
 }
@@ -281,7 +282,8 @@ pre code {
   font-size: 0.88rem;
   line-height: 1.6;
   color: #cdd8e4;
-  white-space: pre;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 /* Good-to-know strip */
@@ -335,5 +337,5 @@ a:hover { color: var(--text); }
   .hero h1 { font-size: 3.1rem; }
   .section h2 { font-size: 2.25rem; }
   .cards { grid-template-columns: repeat(3, 1fr); }
-  .steps { grid-template-columns: repeat(3, 1fr); align-items: start; }
+  .steps { grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: start; }
 }
