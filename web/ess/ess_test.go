@@ -219,7 +219,10 @@ func TestLogout(t *testing.T) {
 
 func TestOwnDataTimesheets(t *testing.T) {
 	f := newFixture(t)
-	h := serve(f.st)
+	// Pin the clock so the punches stay inside the page's "last 30 days"
+	// window no matter when the test runs.
+	now := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+	h := serve(f.st, WithNow(func() time.Time { return now }))
 	ctx := context.Background()
 	// A clocks in at 08:00, B at 09:30 — distinguishable timestamps.
 	atA := time.Date(2026, 10, 15, 8, 0, 0, 0, time.UTC)
