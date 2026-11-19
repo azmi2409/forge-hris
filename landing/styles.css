@@ -11,6 +11,7 @@
   --accent-bright: #79d6bb; /* links / emphasis on dark */
   --accent-ink: #062b23;     /* text on accent buttons */
   --code-bg: #0a0f17;
+  --scroll-thumb: #5b6b82;
   --radius: 10px;
   --max-w: 1080px;
 }
@@ -227,6 +228,7 @@ body {
 /* Steps */
 .steps {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 1.5rem;
   margin-top: 2rem;
 }
@@ -271,7 +273,16 @@ pre {
   border-radius: var(--radius);
   padding: 1.1rem 1.25rem;
   overflow-x: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--scroll-thumb) var(--code-bg);
   margin: 1.25rem 0 0;
+}
+
+pre::-webkit-scrollbar { height: 8px; }
+pre::-webkit-scrollbar-track { background: var(--code-bg); }
+pre::-webkit-scrollbar-thumb {
+  background: var(--scroll-thumb);
+  border-radius: var(--radius);
 }
 
 pre code {
@@ -335,5 +346,5 @@ a:hover { color: var(--text); }
   .hero h1 { font-size: 3.1rem; }
   .section h2 { font-size: 2.25rem; }
   .cards { grid-template-columns: repeat(3, 1fr); }
-  .steps { grid-template-columns: repeat(3, 1fr); align-items: start; }
+  .steps { grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: start; }
 }
