@@ -282,8 +282,7 @@ pre code {
   font-size: 0.88rem;
   line-height: 1.6;
   color: #cdd8e4;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
+  white-space: pre;
 }
 
 /* Good-to-know strip */

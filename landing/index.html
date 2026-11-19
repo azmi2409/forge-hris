@@ -192,7 +192,7 @@
             <p class="step-number">1</p>
             <h3>Start everything</h3>
             <p>One command brings up Postgres 16, the REST API on <code>:8080</code>, and the MCP server on <code>:8081</code>.</p>
-            <pre><code>git clone https://github.com/azmi2409/forge-hris
+            <pre tabindex="0" role="region" aria-label="Setup commands"><code>git clone https://github.com/azmi2409/forge-hris
 cd forge-hris
 docker compose up -d</code></pre>
           </article>
@@ -205,7 +205,7 @@ docker compose up -d</code></pre>
             <p class="step-number">3</p>
             <h3>Connect your agent via MCP</h3>
             <p>Point any MCP-capable client at the server over stdio or HTTP. Example — adapt to your client:</p>
-            <pre><code>{
+            <pre tabindex="0" role="region" aria-label="MCP configuration example"><code>{
   "mcpServers": {
     "forge-hris": {
       "command": "forge-hris-mcp",
